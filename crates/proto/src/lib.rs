@@ -25,6 +25,7 @@ pub mod datagram;
 pub mod error;
 pub mod frame;
 pub mod hello;
+pub mod input;
 pub mod pairing;
 pub mod registry;
 pub mod session;

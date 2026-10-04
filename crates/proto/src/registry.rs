@@ -21,6 +21,39 @@ pub const MEMBER_RECORD: u16 = 0x0004;
 /// The end of one side's records in an exchange.
 pub const RECORDS_DONE: u16 = 0x0005;
 
+/// Focus moves to the receiver through one of its sides.
+pub const FOCUS_ENTER: u16 = 0x0006;
+
+/// The receiver is controlled by another peer; the sender keeps focus.
+pub const FOCUS_REFUSED: u16 = 0x0007;
+
+/// The cursor left the sender's edge toward a target peer.
+pub const EDGE_EXIT: u16 = 0x0008;
+
+/// The sender's own user took focus back.
+pub const TAKEN_BACK: u16 = 0x0009;
+
+/// The sender no longer forwards input to the receiver.
+pub const FOCUS_WITHDRAWN: u16 = 0x000a;
+
+/// Remove the receiver's slots on a side that map to the sender.
+pub const FORGET_SIDE: u16 = 0x000b;
+
+/// A forwarded key press or release, with the motion mark.
+pub const KEY_INPUT: u16 = 0x000c;
+
+/// A forwarded button press or release, with the motion mark.
+pub const BUTTON_INPUT: u16 = 0x000d;
+
+/// Forwarded wheel movement, with the motion mark.
+pub const WHEEL_INPUT: u16 = 0x000e;
+
+/// Show the secure attention screen.
+pub const SECURE_ATTENTION: u16 = 0x000f;
+
+/// Forwarded motion as running totals. Datagram only.
+pub const MOTION: u16 = 0x0010;
+
 /// Where a message type may be sent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Channel {
@@ -45,6 +78,17 @@ pub const REGISTRY: &[TypeInfo] = &[
     stream(PAIR_CONFIRM, "PairConfirm"),
     stream(MEMBER_RECORD, "MemberRecord"),
     stream(RECORDS_DONE, "RecordsDone"),
+    stream(FOCUS_ENTER, "FocusEnter"),
+    stream(FOCUS_REFUSED, "FocusRefused"),
+    stream(EDGE_EXIT, "EdgeExit"),
+    stream(TAKEN_BACK, "TakenBack"),
+    stream(FOCUS_WITHDRAWN, "FocusWithdrawn"),
+    stream(FORGET_SIDE, "ForgetSide"),
+    stream(KEY_INPUT, "KeyInput"),
+    stream(BUTTON_INPUT, "ButtonInput"),
+    stream(WHEEL_INPUT, "WheelInput"),
+    stream(SECURE_ATTENTION, "SecureAttention"),
+    datagram(MOTION, "Motion"),
 ];
 
 /// A stream message type introduced in version 1.
@@ -53,6 +97,16 @@ const fn stream(ty: u16, name: &'static str) -> TypeInfo {
         ty,
         name,
         channel: Channel::Stream,
+        since: 1,
+    }
+}
+
+/// A datagram message type introduced in version 1.
+const fn datagram(ty: u16, name: &'static str) -> TypeInfo {
+    TypeInfo {
+        ty,
+        name,
+        channel: Channel::Datagram,
         since: 1,
     }
 }
@@ -81,24 +135,52 @@ mod tests {
     use super::*;
 
     #[test]
-    fn version_1_defines_exactly_five_stream_types() {
-        let names: Vec<_> = REGISTRY.iter().map(|i| (i.ty, i.name)).collect();
+    fn version_1_defines_exactly_these_types() {
+        use Channel::{Datagram, Stream};
+        let names: Vec<_> = REGISTRY.iter().map(|i| (i.ty, i.name, i.channel)).collect();
         assert_eq!(
             names,
             [
-                (0x0001, "Hello"),
-                (0x0002, "PairPake"),
-                (0x0003, "PairConfirm"),
-                (0x0004, "MemberRecord"),
-                (0x0005, "RecordsDone"),
+                (0x0001, "Hello", Stream),
+                (0x0002, "PairPake", Stream),
+                (0x0003, "PairConfirm", Stream),
+                (0x0004, "MemberRecord", Stream),
+                (0x0005, "RecordsDone", Stream),
+                (0x0006, "FocusEnter", Stream),
+                (0x0007, "FocusRefused", Stream),
+                (0x0008, "EdgeExit", Stream),
+                (0x0009, "TakenBack", Stream),
+                (0x000a, "FocusWithdrawn", Stream),
+                (0x000b, "ForgetSide", Stream),
+                (0x000c, "KeyInput", Stream),
+                (0x000d, "ButtonInput", Stream),
+                (0x000e, "WheelInput", Stream),
+                (0x000f, "SecureAttention", Stream),
+                (0x0010, "Motion", Datagram),
             ]
         );
         for info in REGISTRY {
-            assert_eq!(check(info.ty, Channel::Stream, 1), Ok(info));
+            assert_eq!(check(info.ty, info.channel, 1), Ok(info));
         }
         assert_eq!(
-            check(0x0006, Channel::Stream, 1),
-            Err(ProtocolError::UnknownType { ty: 0x0006 })
+            check(0x0011, Channel::Stream, 1),
+            Err(ProtocolError::UnknownType { ty: 0x0011 })
+        );
+    }
+
+    #[test]
+    fn motion_on_a_stream_is_rejected() {
+        assert_eq!(
+            check(MOTION, Channel::Stream, 1),
+            Err(ProtocolError::WrongChannel { ty: MOTION })
+        );
+    }
+
+    #[test]
+    fn key_input_in_a_datagram_is_rejected() {
+        assert_eq!(
+            check(KEY_INPUT, Channel::Datagram, 1),
+            Err(ProtocolError::WrongChannel { ty: KEY_INPUT })
         );
     }
 

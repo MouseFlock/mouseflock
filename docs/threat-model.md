@@ -1,6 +1,6 @@
 # DeskHop threat model
 
-*Status: covers the wire, pairing, desk membership, and the LAN transport. The named-pipe and secure-desktop boundaries are filled in with `ipc`.*
+*Status: covers the wire, pairing, desk membership, the LAN transport, and forwarded input. The named-pipe and secure-desktop boundaries are filled in with `ipc`.*
 
 DeskHop injects keystrokes received over the network, and its service runs as SYSTEM. This document records what it defends against and where.
 
@@ -69,6 +69,16 @@ Residual risks:
 - **Handshake cost.** Each stranger handshake costs the service an Ed25519 signature and a verification. The limit on strangers bounds what they hold open, not how fast they handshake; rate limiting is left to the firewall unless it becomes a problem.
 - **Liveness tuning.** A host that can drop packets between two members for about a second makes them report each other lost. Losing a peer releases held keys, so this costs availability, not safety.
 - **Presence on the LAN.** Advertisements show which hosts run DeskHop, and when someone is pairing.
+
+### Forwarded input (LAN → service)
+
+Engine messages and `Motion` datagrams can move focus, type and click on a machine. Specified in `openspec/specs/input-forwarding/spec.md`.
+
+- **Only members that are up.** Engine messages travel only on member connections, after the peer's `RecordsDone`. One on a pairing connection, or earlier on a member connection, closes it with a protocol error. `Motion` datagrams that arrive before then are dropped. The node also reports a message only from the peer's current up connection, so a dialer being closed with code `5` gets nothing through.
+- **Strict layouts.** Every engine message has a fixed length, and undefined side, button and pressed-or-released codes are protocol errors, under the same no-panic rules as the rest of `proto`.
+- **No new power for a member.** A member already counts as trusted to drive input. Its input reaches a machine's OS only while that machine's engine has accepted it as the controller, through `FocusEnter` and the crossing rules. The local user takes control back with a key press or deliberate mouse movement (`input-focus`). Running totals can carry arbitrarily large movement, but a member could already send it as many smaller moves.
+
+Residual risk: a compromised member can push focus onto a machine whose layout maps an edge to it, and type there until the local user takes control back. This is the same trust a member has always had; removing the member ends it.
 
 ### Identity key at rest
 

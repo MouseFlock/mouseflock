@@ -42,7 +42,7 @@ Build order: `proto` → `model` + `engine` with replay tests → `pairing` + `t
 ## Open questions for the first spec changes
 
 - Pairing-code lengths, time limits, and attempt limits (ADR 0004, Amendment 2).
-- Motion datagram byte layout. Direction is set: a sequence number plus running totals.
+- ~~Motion datagram byte layout.~~ Settled: running totals with a sequence number, coalesced to one datagram per 4 ms (`docs/protocol.md`, Motion).
 - Which monitor identity survives docks and port changes: EDID or Windows device path (ADR 0005; spike).
 - Whether a machine locks or sleeps while its input is being forwarded (spike).
 - Managed-configuration schema and its registry source.
