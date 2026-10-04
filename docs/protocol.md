@@ -52,6 +52,17 @@ Stream and datagram messages share one 16-bit namespace. A type not defined in t
 | `0x0003` | `PairConfirm` | stream | 1 | See [Pairing](#pairing). |
 | `0x0004` | `MemberRecord` | stream | 1 | See [Desk membership](#desk-membership). |
 | `0x0005` | `RecordsDone` | stream | 1 | Empty. See [Desk membership](#desk-membership). |
+| `0x0006` | `FocusEnter` | stream | 1 | See [Engine messages](#engine-messages). |
+| `0x0007` | `FocusRefused` | stream | 1 | Empty. |
+| `0x0008` | `EdgeExit` | stream | 1 | See [Engine messages](#engine-messages). |
+| `0x0009` | `TakenBack` | stream | 1 | Empty. |
+| `0x000A` | `FocusWithdrawn` | stream | 1 | Empty. |
+| `0x000B` | `ForgetSide` | stream | 1 | See [Engine messages](#engine-messages). |
+| `0x000C` | `KeyInput` | stream | 1 | See [Engine messages](#engine-messages). |
+| `0x000D` | `ButtonInput` | stream | 1 | See [Engine messages](#engine-messages). |
+| `0x000E` | `WheelInput` | stream | 1 | See [Engine messages](#engine-messages). |
+| `0x000F` | `SecureAttention` | stream | 1 | Empty. |
+| `0x0010` | `Motion` | datagram | 1 | See [Motion](#motion). |
 
 ### Hello and version negotiation
 
@@ -90,7 +101,7 @@ Normative requirements: `openspec/specs/peer-transport/spec.md` and `openspec/sp
 
 Any other ALPN fails the handshake.
 
-**Control stream.** The dialer opens the connection's first bidirectional stream. Both sides write `Hello` on it at once ([Hello and version negotiation](#hello-and-version-negotiation)). Every message in this document travels on it. A side finishes the stream only just before closing the connection.
+**Control stream.** The dialer opens the connection's first bidirectional stream. Both sides write `Hello` on it at once ([Hello and version negotiation](#hello-and-version-negotiation)). Every stream message in this document travels on it; `Motion` travels in datagrams. A side finishes the stream only just before closing the connection.
 
 **Member connections.**
 
@@ -216,6 +227,55 @@ MemberRecord payload (138 + n bytes):
   - More than 256 records before `RecordsDone`, or a second `RecordsDone`, is a protocol error.
 - *Removal of the receiver:* a machine that accepts a winning removal of itself drops every record. Its identity key is kept.
 
+### Engine messages
+
+What one machine's focus engine tells another's: focus changes, layout corrections, and forwarded keys, buttons and wheel. Normative requirements: `openspec/specs/input-forwarding/spec.md`.
+
+- *Where:* only on a member connection whose peer is up (both `RecordsDone` exchanged), on the control stream, in the order sent. An engine message on a pairing connection, or on a member connection before the peer is up, is a protocol error.
+- *Codes:* side `0` left, `1` right, `2` top, `3` bottom. Button `0` left, `1` right, `2` middle, `3` X1, `4` X2. Down `0` released, `1` pressed. Any other value is a protocol error.
+- *Fraction:* a position along a side, `0` at the top or left end and `65535` at the other, across the whole extent of the machine's screens on that axis.
+- *Wheel:* in 1/120 of a notch. Positive `dy` is away from the user, positive `dx` to the right.
+
+| Message | Payload | Bytes |
+|---|---|---|
+| `FocusEnter` | side: u8, fraction: u16, from: 32 B peer identity | 35 |
+| `EdgeExit` | target: 32 B peer identity, side: u8, fraction: u16 | 35 |
+| `ForgetSide` | side: u8 | 1 |
+| `KeyInput` | mark: 12 B, usage: u16 (USB HID keyboard page), down: u8 | 15 |
+| `ButtonInput` | mark: 12 B, button: u8, down: u8 | 14 |
+| `WheelInput` | mark: 12 B, dx: i32, dy: i32 | 20 |
+| `FocusRefused`, `TakenBack`, `FocusWithdrawn`, `SecureAttention` | empty | 0 |
+
+What each message means:
+
+- `FocusEnter`: focus moves to the receiver through its `side` at `fraction`. `from` is the machine whose edge the cursor left.
+- `FocusRefused`: another peer already controls the receiver of the `FocusEnter`, and the sender of the `FocusEnter` keeps focus.
+- `EdgeExit`: the cursor left the controlled sender's `side` at `fraction`, toward `target`.
+- `TakenBack`: the controlled sender's own user took focus back.
+- `FocusWithdrawn`: the sender no longer forwards input to the receiver.
+- `ForgetSide`: the receiver removes its slots on `side` that map to the sender.
+- `SecureAttention`: the receiver shows its secure attention screen.
+
+The mark is described under [Motion](#motion).
+
+### Motion
+
+Forwarded mouse movement travels as running totals in datagrams. A lost datagram loses no movement, because the next one carries it.
+
+```
+Motion payload, and the mark (12 bytes):
++-----------+---------------+---------------+
+| seq: u32  | total_dx: i32 | total_dy: i32 |
++-----------+---------------+---------------+
+```
+
+- *Totals:* the sum of all movement sent on this connection since the peer came up, wrapping on overflow. The sender's first sequence number is 1. The receiver starts at sequence 0 with totals 0.
+- *Applying:* a receiver accepts a mark only if `(seq − last_seq) mod 2³²`, read as a signed 32-bit integer, is positive. It reports the movement `total − last_total`, computed with wrapping arithmetic, and stores the mark. Older and equal marks are ignored.
+- *Coalescing:* a connection sends at most one `Motion` datagram every 4 ms. Movement that arrives sooner goes in the next datagram, sent 4 ms after the previous one.
+- *Repeat:* 20 ms after a `Motion` datagram, if no movement has arrived since, the same sequence number and totals are sent once more.
+- *The mark:* every `KeyInput`, `ButtonInput` and `WheelInput` starts with a mark covering all movement forwarded before it, including movement not yet sent in a datagram. That movement then gets no datagram of its own. The receiver applies the mark before acting on the message, so a click never overtakes the movement before it.
+- *Before up:* `Motion` datagrams that arrive before the peer is up are dropped, not treated as errors.
+
 ### Close reasons
 
 Sent as the QUIC application error code when closing a connection.
@@ -239,5 +299,5 @@ No messages are defined yet.
 
 | Protocol | Version | Change |
 |---|---|---|
-| Peer | 1 | Stream frames, datagrams, message-type registry, `Hello` version negotiation, close reasons, pairing (`PairPake`, `PairConfirm`), desk membership (`MemberRecord`, `RecordsDone`), transport (port 47391, identity certificates, ALPNs, control stream, member connections, one connection per pair, liveness, mDNS), close reason `5`. |
+| Peer | 1 | Stream frames, datagrams, message-type registry, `Hello` version negotiation, close reasons, pairing (`PairPake`, `PairConfirm`), desk membership (`MemberRecord`, `RecordsDone`), transport (port 47391, identity certificates, ALPNs, control stream, member connections, one connection per pair, liveness, mDNS), close reason `5`, engine messages (`0x0006`–`0x000F`) and `Motion` datagrams (`0x0010`). Version 1 has not shipped, so these are added without a version bump. |
 | IPC | 1 | Initial version; no messages. |

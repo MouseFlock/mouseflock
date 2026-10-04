@@ -5,7 +5,7 @@
 
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use model::PeerId;
@@ -236,10 +236,18 @@ pub async fn close_code(connection: &quinn::Connection, within: Duration) -> Opt
     }
 }
 
-/// Forwards UDP between a client and `server` until cut.
+/// Forwards UDP between a client and `server` until cut. In lossy mode it
+/// drops every third packet in each direction.
 pub struct Relay {
     pub addr: SocketAddr,
     cut: Arc<AtomicBool>,
+    lossy: Arc<AtomicBool>,
+}
+
+/// True if a packet goes through: always, unless lossy, when every third is
+/// dropped.
+fn passes(lossy: &AtomicBool, count: &AtomicU64) -> bool {
+    !lossy.load(Ordering::SeqCst) || count.fetch_add(1, Ordering::SeqCst) % 3 != 2
 }
 
 impl Relay {
@@ -248,33 +256,44 @@ impl Relay {
         let back = Arc::new(UdpSocket::bind((LOCAL, 0)).await.unwrap());
         let addr = front.local_addr().unwrap();
         let cut = Arc::new(AtomicBool::new(false));
+        let lossy = Arc::new(AtomicBool::new(false));
         let client = Arc::new(tokio::sync::Mutex::new(None::<SocketAddr>));
         {
-            let (front, back, cut, client) =
-                (front.clone(), back.clone(), cut.clone(), client.clone());
+            let (front, back, cut, lossy, client) = (
+                front.clone(),
+                back.clone(),
+                cut.clone(),
+                lossy.clone(),
+                client.clone(),
+            );
             tokio::spawn(async move {
+                let count = AtomicU64::new(0);
                 let mut buf = vec![0u8; 65_536];
                 while let Ok((n, from)) = front.recv_from(&mut buf).await {
                     *client.lock().await = Some(from);
-                    if !cut.load(Ordering::SeqCst) {
+                    if !cut.load(Ordering::SeqCst) && passes(&lossy, &count) {
                         let _ = back.send_to(&buf[..n], server).await;
                     }
                 }
             });
         }
         {
-            let (front, back, cut, client) = (front, back, cut.clone(), client);
+            let (front, back, cut, lossy, client) =
+                (front, back, cut.clone(), lossy.clone(), client);
             tokio::spawn(async move {
+                let count = AtomicU64::new(0);
                 let mut buf = vec![0u8; 65_536];
                 while let Ok((n, _)) = back.recv_from(&mut buf).await {
                     let to = *client.lock().await;
-                    if let (false, Some(to)) = (cut.load(Ordering::SeqCst), to) {
+                    if let (false, Some(to)) = (cut.load(Ordering::SeqCst), to)
+                        && passes(&lossy, &count)
+                    {
                         let _ = front.send_to(&buf[..n], to).await;
                     }
                 }
             });
         }
-        Self { addr, cut }
+        Self { addr, cut, lossy }
     }
 
     pub fn cut(&self) {
@@ -283,6 +302,11 @@ impl Relay {
 
     pub fn restore(&self) {
         self.cut.store(false, Ordering::SeqCst);
+    }
+
+    /// Drops every third packet in each direction from now on.
+    pub fn lossy(&self) {
+        self.lossy.store(true, Ordering::SeqCst);
     }
 }
 

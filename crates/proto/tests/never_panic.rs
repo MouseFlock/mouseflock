@@ -5,9 +5,12 @@
 use proto::datagram::MAX_DATAGRAM_LEN;
 use proto::frame::{self, Decoded, HEADER_LEN};
 use proto::hello::Hello;
+use proto::input::{
+    Button, ButtonInput, EdgeExit, FocusEnter, InputMessage, KeyInput, Mark, Side, WheelInput,
+};
 use proto::pairing::{Change, MemberRecord, Name, PairConfirm, PairPake, PairingMessage};
 use proto::registry;
-use proto::session::{ControlEvent, Message, Session, StreamEvent};
+use proto::session::{ControlEvent, DatagramEvent, Message, Session, StreamEvent};
 
 const ITERATIONS: usize = 300_000;
 
@@ -79,6 +82,10 @@ fn decode_payload(m: Message<'_>) {
         decoded.encode_frame(&mut out).unwrap();
         assert_eq!(&out[HEADER_LEN..], m.payload);
     }
+    if let Ok(decoded) = InputMessage::decode(m.info.ty, m.payload) {
+        assert_eq!(decoded.ty(), m.info.ty);
+        assert_eq!(decoded.payload(), m.payload);
+    }
 }
 
 fn agreed_session() -> Session {
@@ -99,10 +106,14 @@ fn valid_frames(rng: &mut Rng) -> Vec<u8> {
     let mut out = Vec::new();
     Hello::this_release().encode_frame(&mut out).unwrap();
     for _ in 0..rng.below(4) {
-        if rng.below(2) == 0 {
+        let pick = rng.below(3);
+        if pick == 0 {
             pairing_message(rng).encode_frame(&mut out).unwrap();
+        } else if pick == 1 {
+            let m = input_message(rng);
+            frame::encode(m.ty(), &m.payload(), &mut out).unwrap();
         } else {
-            let ty = rng.below(7) as u16;
+            let ty = rng.below(0x12) as u16;
             let payload = rng.bytes_below(12);
             frame::encode(ty, &payload, &mut out).unwrap();
         }
@@ -136,6 +147,74 @@ fn pairing_message(rng: &mut Rng) -> PairingMessage<'static> {
             signature: array(rng),
         }),
         _ => PairingMessage::RecordsDone,
+    }
+}
+
+fn mark(rng: &mut Rng) -> Mark {
+    Mark {
+        seq: rng.next() as u32,
+        dx: rng.next() as i32,
+        dy: rng.next() as i32,
+    }
+}
+
+/// Any engine message, `Motion` included: its frame or datagram encoding
+/// is chosen by the caller.
+fn input_message(rng: &mut Rng) -> InputMessage {
+    const SIDES: [Side; 4] = [Side::Left, Side::Right, Side::Top, Side::Bottom];
+    const BUTTONS: [Button; 5] = [
+        Button::Left,
+        Button::Right,
+        Button::Middle,
+        Button::X1,
+        Button::X2,
+    ];
+    let side = SIDES[rng.below(4)];
+    match rng.below(11) {
+        0 => InputMessage::FocusEnter(FocusEnter {
+            side,
+            fraction: rng.next() as u16,
+            from: array(rng),
+        }),
+        1 => InputMessage::FocusRefused,
+        2 => InputMessage::EdgeExit(EdgeExit {
+            target: array(rng),
+            side,
+            fraction: rng.next() as u16,
+        }),
+        3 => InputMessage::TakenBack,
+        4 => InputMessage::FocusWithdrawn,
+        5 => InputMessage::ForgetSide(side),
+        6 => InputMessage::Key(KeyInput {
+            mark: mark(rng),
+            usage: rng.next() as u16,
+            down: rng.below(2) == 0,
+        }),
+        7 => InputMessage::Button(ButtonInput {
+            mark: mark(rng),
+            button: BUTTONS[rng.below(5)],
+            down: rng.below(2) == 0,
+        }),
+        8 => InputMessage::Wheel(WheelInput {
+            mark: mark(rng),
+            dx: rng.next() as i32,
+            dy: rng.next() as i32,
+        }),
+        9 => InputMessage::SecureAttention,
+        _ => InputMessage::Motion(mark(rng)),
+    }
+}
+
+/// Decodes a datagram through both sessions; a decoded `Motion` re-encodes
+/// to the same bytes.
+fn drive_datagram(fresh: &Session, agreed: &Session, input: &[u8]) {
+    let _ = fresh.on_datagram(input);
+    if let Ok(DatagramEvent::Message(m)) = agreed.on_datagram(input)
+        && let Ok(decoded) = InputMessage::decode(m.info.ty, m.payload)
+    {
+        let mut out = Vec::new();
+        decoded.encode(&mut out).unwrap();
+        assert_eq!(out, input);
     }
 }
 
@@ -187,7 +266,22 @@ fn random_datagrams_never_panic() {
             rng.below(16)
         };
         let input = rng.bytes(len);
-        let _ = fresh.on_datagram(&input);
-        let _ = agreed.on_datagram(&input);
+        drive_datagram(&fresh, &agreed, &input);
+    }
+}
+
+#[test]
+fn mutated_motion_datagrams_never_panic() {
+    let mut rng = Rng(0x6a09_e667_f3bc_c908);
+    let (fresh, agreed) = (Session::new(Hello::this_release()), agreed_session());
+    for _ in 0..ITERATIONS {
+        let mut input = Vec::new();
+        InputMessage::Motion(mark(&mut rng))
+            .encode(&mut input)
+            .unwrap();
+        if rng.below(2) == 0 {
+            mutate(&mut input, &mut rng);
+        }
+        drive_datagram(&fresh, &agreed, &input);
     }
 }

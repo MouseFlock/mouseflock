@@ -9,6 +9,7 @@
 use libfuzzer_sys::fuzz_target;
 use proto::frame::{self, Decoded, Frame, HEADER_LEN};
 use proto::hello::Hello;
+use proto::input::InputMessage;
 use proto::pairing::PairingMessage;
 use proto::registry;
 use proto::session::{ControlEvent, Message, Session, StreamEvent};
@@ -22,6 +23,10 @@ fn decode_payload(m: Message<'_>) {
         let mut out = Vec::new();
         assert!(decoded.encode_frame(&mut out).is_ok());
         assert_eq!(out.get(HEADER_LEN..), Some(m.payload));
+    }
+    if let Ok(decoded) = InputMessage::decode(m.info.ty, m.payload) {
+        assert_eq!(decoded.ty(), m.info.ty);
+        assert_eq!(decoded.payload(), m.payload);
     }
 }
 

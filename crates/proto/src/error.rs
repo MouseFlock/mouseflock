@@ -40,6 +40,8 @@ pub enum ProtocolError {
     NameNotUtf8,
     /// A `MemberRecord` kind other than addition or removal.
     InvalidRecordKind { kind: u8 },
+    /// A side, button, or pressed-or-released code the layout does not define.
+    InvalidCode { ty: u16, value: u8 },
     /// Input after the session already failed.
     SessionFailed,
 }
@@ -75,6 +77,9 @@ impl fmt::Display for ProtocolError {
             }
             Self::NameNotUtf8 => write!(f, "machine name is not UTF-8"),
             Self::InvalidRecordKind { kind } => write!(f, "unknown membership record kind {kind}"),
+            Self::InvalidCode { ty, value } => {
+                write!(f, "message type {ty:#06x} has undefined code {value}")
+            }
             Self::SessionFailed => write!(f, "session already failed"),
         }
     }

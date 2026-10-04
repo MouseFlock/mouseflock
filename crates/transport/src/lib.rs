@@ -10,6 +10,8 @@
 mod conn;
 pub mod discovery;
 pub mod endpoint;
+mod forward;
+pub mod motion;
 pub mod net;
 mod node;
 pub mod tls;

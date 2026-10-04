@@ -6,7 +6,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use model::{Millis, PeerId};
+use model::{Millis, PeerId, PeerMessage};
 use pairing::{
     Binding, Code, ConnId, Desk, EXPORTER_LABEL, EXPORTER_LEN, JoinFailure, Joiner, JoinerOutput,
     Machine, MachineName, ModeClosed, ModeOutput, Now, PairingMode, RecordInbox, SignedRecord,
@@ -99,6 +99,13 @@ pub enum Event {
     TrustStore(Vec<u8>),
     /// Where each member was last reached.
     Addresses(BTreeMap<PeerId, SocketAddr>),
+    /// A message from an up member's engine. Forwarded motion arrives as
+    /// `PeerMessage::Input(InputAction::Motion { .. })`, rebuilt from the
+    /// running totals.
+    Message {
+        peer: PeerId,
+        msg: PeerMessage,
+    },
 }
 
 /// Pairing mode could not open: no IPv4 network.
@@ -121,6 +128,7 @@ enum Command {
     Goodbye(oneshot::Sender<()>),
     Resume,
     Sighting(Sighting),
+    Send(PeerId, PeerMessage),
     Connections(oneshot::Sender<Vec<Connection>>),
     Shutdown,
 }
@@ -182,6 +190,12 @@ impl NodeHandle {
     /// Reports a machine seen on the network. mDNS calls this; so do tests.
     pub fn sighting(&self, sighting: Sighting) {
         let _ = self.tx.send(Command::Sighting(sighting));
+    }
+
+    /// Sends an engine message to `peer` if it is up; otherwise drops it.
+    /// The engine learns the peer is gone from `Event::PeerDown`.
+    pub fn send(&self, peer: PeerId, msg: PeerMessage) {
+        let _ = self.tx.send(Command::Send(peer, msg));
     }
 
     /// How many member connections are open, for diagnostics.
@@ -263,6 +277,8 @@ pub(crate) enum Internal {
     DialFailed(Purpose, Vec<Option<CloseReason>>),
     Ready(ConnId),
     Message(ConnId, u16, Vec<u8>),
+    /// An engine message from a member connection, already decoded.
+    Peer(ConnId, PeerMessage),
     Closed(ConnId, Cause),
 }
 
@@ -497,6 +513,11 @@ impl Node {
                 }
             }
             Command::Sighting(s) => self.sighting(s),
+            Command::Send(peer, msg) => {
+                if let Some(conn) = self.up.get(&peer).and_then(|id| self.conns.get(id)) {
+                    conn.send(Out::Peer(msg));
+                }
+            }
             Command::Connections(reply) => {
                 let open = self
                     .conns
@@ -556,6 +577,7 @@ impl Node {
             Internal::DialFailed(purpose, reasons) => self.dial_failed(purpose, reasons),
             Internal::Ready(id) => self.ready(id),
             Internal::Message(id, ty, payload) => self.message(id, ty, &payload),
+            Internal::Peer(id, msg) => self.peer_message(id, msg),
             Internal::Closed(id, cause) => self.closed(id, cause),
         }
     }
@@ -574,6 +596,7 @@ impl Node {
             id,
             connection.clone(),
             dialed,
+            matches!(role, Role::Member { .. }),
             out_rx,
             self.internal.clone(),
         ));
@@ -754,6 +777,21 @@ impl Node {
                 }
                 self.joiner_outputs(id, out);
             }
+        }
+    }
+
+    /// Reports an engine message, but only from the peer's current up
+    /// connection: not from a dialer about to be closed with `5`, nor
+    /// from a duplicate being closed by the one-connection rule.
+    fn peer_message(&self, id: ConnId, msg: PeerMessage) {
+        let Some(conn) = self.conns.get(&id) else {
+            return;
+        };
+        if self.up.get(&conn.peer) == Some(&id) {
+            self.emit(Event::Message {
+                peer: conn.peer,
+                msg,
+            });
         }
     }
 
