@@ -1,0 +1,31 @@
+[package]
+name = "win32-session"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+tokio = { workspace = true, features = ["net"] }
+
+[dependencies.windows]
+workspace = true
+features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authentication_Identity",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Environment",
+    "Win32_System_Pipes",
+    "Win32_System_Registry",
+    "Win32_System_RemoteDesktop",
+    "Win32_System_Threading",
+]
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["net", "rt", "macros", "io-util"] }
+
+[lints]
+workspace = true

@@ -879,6 +879,15 @@ impl Node {
         self.mark_up(id);
     }
 
+    /// Records where `peer` was reached, reporting the addresses if that
+    /// changed them.
+    fn reached(&mut self, peer: PeerId, addr: SocketAddr) {
+        if self.last_reached.get(&peer) != Some(&addr) {
+            self.last_reached.insert(peer, addr);
+            self.emit(Event::Addresses(self.last_reached.clone()));
+        }
+    }
+
     fn mark_up(&mut self, id: ConnId) {
         let me = self.me;
         let Some(conn) = self.conns.get_mut(&id) else {
@@ -899,10 +908,7 @@ impl Node {
             redial.backoff.reset();
             redial.dialing = false;
         }
-        if self.last_reached.get(&peer) != Some(&remote) {
-            self.last_reached.insert(peer, remote);
-            self.emit(Event::Addresses(self.last_reached.clone()));
-        }
+        self.reached(peer, remote);
         match self.up.get(&peer).copied() {
             None => {
                 self.up.insert(peer, id);
@@ -1092,7 +1098,7 @@ impl Node {
                     self.emit(Event::Paired { peer, name });
                     if let Some(c) = self.conns.get(&conn) {
                         let addr = c.connection.remote_address();
-                        self.last_reached.insert(peer, addr);
+                        self.reached(peer, addr);
                     }
                     self.dial_soon(peer);
                 }
@@ -1177,7 +1183,7 @@ impl Node {
                 JoinerOutput::Paired { peer, name } => {
                     if let Some(c) = self.conns.get(&id) {
                         let addr = c.connection.remote_address();
-                        self.last_reached.insert(peer, addr);
+                        self.reached(peer, addr);
                     }
                     if let Some(race) = self.race.take() {
                         self.close_candidates(race.id, Some(id));

@@ -1,6 +1,6 @@
 # DeskHop threat model
 
-*Status: covers the wire, pairing, desk membership, the LAN transport, forwarded input, and the agent → service pipe. The UI pipe and the secure desktop are filled in with their changes.*
+*Status: covers the wire, pairing, desk membership, the LAN transport, forwarded input, the agent → service pipe, the service's data folder, console mode and secure attention. The UI pipe and the secure desktop are filled in with their changes.*
 
 DeskHop injects keystrokes received over the network, and its service runs as SYSTEM. This document records what it defends against and where.
 
@@ -89,11 +89,31 @@ The session agent runs as the logged-in user and reports every key and mouse eve
 - **A stalled or hostile agent cannot block the service.** The service reads into a buffer holding at most one frame. Sending a command never waits, and an agent that stops reading is cut off after 4,096 queued commands. Events waiting for the first clock exchange are capped at 10,000.
 - **The link ending releases input.** The agent returns capture to pass-all and removes its hooks when the link ends. If the agent dies, Windows removes its hooks. Input is never left withheld without a service.
 
-Open item, closed by `add-service`: today nothing checks which process connects to an agent pipe, so a process that reached it could claim physical input, which the service would forward to peers. `add-service` closes this:
-- each agent's pipe gets a random name, created before the agent starts, with `FILE_FLAG_FIRST_PIPE_INSTANCE`;
-- its ACL allows only SYSTEM and that session's user;
-- the service accepts only the process ID it launched (`GetNamedPipeClientProcessId`).
+- **Only the launched agent is accepted.** Anything that reached an agent pipe could claim physical input, which the service forwards to peers. So, specified in `openspec/specs/session-agents/spec.md`:
+  - each launch creates a new pipe whose name carries 128 random bits and is never reused;
+  - the pipe is created before the agent starts, as the first and only instance of that name (`FILE_FLAG_FIRST_PIPE_INSTANCE`, one instance), and refuses remote clients;
+  - its protected ACL lets only SYSTEM and the session's user open it;
+  - the service compares the connecting client's process ID (`GetNamedPipeClientProcessId`) with the process it launched, before reading a byte, and closes a mismatch unread. It keeps the launched process's handle open, so that ID cannot be reused by another process meanwhile.
+- **The agent runs as the user, not as SYSTEM.** The service launches it with the session user's own token (`WTSQueryUserToken`, `CreateProcessAsUserW`), so it has the user's rights and no more. Every launch goes through one function in `bin/service`, and the Win32 calls live in `win32-session` (ADR 0006).
+
+Residual risk: another process running as the same user can open the pipe if it wins the race to connect. It is then closed unread, and that launch counts as failed. Such a process could keep the agent from linking, a denial of service, but it cannot inject or report input. A process running as the user can already synthesize input on that user's desktop, so the pipe adds no power.
 
 ### Identity key at rest
 
 The identity key and trust store are files that only SYSTEM can read. A local administrator can read or replace them. A local administrator can already inject input and read the clipboard, so this is outside the threat model; DPAPI was rejected for the same reason.
+
+Defenses for the data folder (`%ProgramData%\DeskHop`), specified in `openspec/specs/service-host/spec.md`:
+
+- **Owned by SYSTEM before anything is read.** `ProgramData` lets standard users create folders, so a user could create `DeskHop` first and plant an identity, a trust store or layouts in it. At every start, before reading a file, the service checks the folder:
+  - owned by SYSTEM or Administrators: its owner is set to SYSTEM and its protected, SYSTEM-only ACL is applied again;
+  - anything else (another owner, a junction or symbolic link, a file): it is moved aside unread and a new folder is created.
+- **Atomic, checked files.** Every file is written to a temporary file and renamed over the old one. A file that does not parse, or is larger than 1 MiB, is moved aside and treated as absent; nothing partial is used. A damaged identity costs the desk (peers must pair again), which is logged as an error.
+- **The log is readable by administrators.** The log file carries its own ACL (SYSTEM full control, Administrators read), so an elevated administrator can read it by path, while the folder and the other files stay SYSTEM-only. Logs never hold pairing codes, keys or input contents.
+
+### Console mode (development)
+
+`deskhop-service --console` runs as the logged-in user and keeps its data in the user's profile (`%LOCALAPPDATA%\DeskHop\console`), never in the service's folder. Its identity and trust store are therefore as safe as the user's own files: any process running as that user can read them, and could pose as this console-mode machine to its peers. It is a development tool, used until the UI exists, and the registered service never reads its files.
+
+### Secure attention (Ctrl-Alt-Del)
+
+A controlling peer can ask a machine to show its secure attention screen. The registered service calls `SendSAS` only if the `SoftwareSASGeneration` policy allows services (value 1 or 3), and logs it otherwise. The development script sets the policy to 1 when it is unset, as the installer will. `SendSAS` shows the Ctrl-Alt-Del screen and injects nothing. A member can already control the machine, so the request adds no power. Console mode cannot call it and logs that.

@@ -8,7 +8,9 @@
 //!
 //! Every machine runs one [`Engine`]. The host feeds it [`Event`]s: local input
 //! from the agent (with a monotonic timestamp and its [`Origin`]), messages
-//! from peers' engines, peers connecting and disconnecting, and changes to the
+//! from peers' engines, peers connecting and disconnecting, the agent going
+//! away ([`Event::LocalInputLost`]: focus that depended on it is returned to
+//! its owner and held input is released), and changes to the
 //! screen, layout, or [`Config`]. [`Engine::handle`] returns the [`Decision`]s
 //! that follow. The engine never reads a clock, starts a thread, or does I/O:
 //! the same events always produce the same decisions.
@@ -133,6 +135,10 @@ pub enum Event {
     },
     PeerConnected(PeerId),
     PeerLost(PeerId),
+    /// This machine's input agent ended: no local input arrives and nothing
+    /// can be injected until a new one reports. Focus that depended on it
+    /// returns to its owner, and the peer releases what it held.
+    LocalInputLost,
     ScreenChanged(Screen),
     /// Sets the current monitor set's layout (tests, and later the
     /// arrangement view). Not reported back as a change.
@@ -325,6 +331,7 @@ impl Engine {
                 self.connected.insert(peer);
             }
             Event::PeerLost(peer) => self.on_peer_lost(peer),
+            Event::LocalInputLost => self.on_local_input_lost(),
             Event::ScreenChanged(screen) => self.on_screen(screen),
             Event::LayoutChanged(layout) => {
                 self.book.set(self.set_key.clone(), layout.clone());
@@ -805,6 +812,24 @@ impl Engine {
                 self.set_focus(Focus::Local, None);
             }
             _ => {}
+        }
+    }
+
+    /// The agent is gone: a peer we forward to withdraws and releases, a
+    /// peer controlling us gets its focus back, and nothing held locally is
+    /// remembered, since its release will never be reported.
+    fn on_local_input_lost(&mut self) {
+        self.physical_keys.clear();
+        self.pressed_local.clear();
+        self.push = None;
+        match self.focus {
+            Focus::Forwarding { to, .. } => {
+                self.forwarded.clear();
+                self.send(to, PeerMessage::FocusWithdrawn);
+                self.set_focus(Focus::Local, None);
+            }
+            Focus::Controlled { .. } => self.take_back(),
+            Focus::Local => {}
         }
     }
 

@@ -3,7 +3,7 @@
 
 mod replay;
 
-use engine::{CaptureMode, Config, Decision, EdgeSensitivity, FocusView};
+use engine::{CaptureMode, Config, Decision, EdgeSensitivity, Event, FocusView};
 use model::{Button, EdgeFraction, InputAction, Key, PeerMessage, Point, Screen, Side};
 use replay::{A, B, C, Desk, button, hd, key, monitor, motion};
 
@@ -526,4 +526,92 @@ fn ctrl_alt_end_with_local_focus() {
         let out = desk.physical(A, key(k, true));
         assert!(out.is_quiet(), "{out:?}");
     }
+}
+
+// ---- Losing local input ----
+
+#[test]
+fn agent_ends_while_forwarding() {
+    let mut desk = a_controls_b();
+    desk.physical(A, key(Key::LEFT_CTRL, true));
+    let out = desk.event(A, Event::LocalInputLost);
+    assert_eq!(
+        out.of(A),
+        [
+            Decision::Send {
+                peer: B,
+                msg: PeerMessage::FocusWithdrawn
+            },
+            Decision::SetCapture(CaptureMode::PassAll),
+            Decision::FocusChanged(FocusView::Local),
+        ]
+    );
+    assert_eq!(
+        out.of(B),
+        [
+            Decision::Inject(InputAction::Key {
+                key: Key::LEFT_CTRL,
+                down: false
+            }),
+            Decision::SetCapture(CaptureMode::PassAll),
+            Decision::FocusChanged(FocusView::Local),
+        ]
+    );
+    assert_eq!(desk.focus(A), FocusView::Local);
+    assert_eq!(desk.focus(B), FocusView::Local);
+}
+
+#[test]
+fn agent_ends_while_controlled() {
+    let mut desk = a_controls_b();
+    desk.physical(A, key(KEY_X, true));
+    let out = desk.event(B, Event::LocalInputLost);
+    assert_eq!(
+        out.of(B),
+        [
+            Decision::Inject(InputAction::Key {
+                key: KEY_X,
+                down: false
+            }),
+            Decision::Send {
+                peer: A,
+                msg: PeerMessage::TakenBack
+            },
+            Decision::SetCapture(CaptureMode::PassAll),
+            Decision::FocusChanged(FocusView::Local),
+        ]
+    );
+    // A gets focus back with its cursor where it left.
+    assert_eq!(
+        out.of(A),
+        [
+            Decision::WarpCursor(Point::new(1919, 540)),
+            Decision::SetCapture(CaptureMode::PassAll),
+            Decision::FocusChanged(FocusView::Local),
+        ]
+    );
+}
+
+#[test]
+fn agent_ends_with_local_focus() {
+    let mut desk = a_beside_b();
+    desk.physical(A, key(KEY_X, true));
+    let out = desk.event(A, Event::LocalInputLost);
+    assert!(out.is_quiet(), "{out:?}");
+}
+
+#[test]
+fn release_after_relink_is_dropped() {
+    // Ctrl is held while forwarding, the agent ends, and a new agent reports
+    // Ctrl's release after the cursor crossed again: B never saw this press.
+    let mut desk = a_controls_b();
+    desk.physical(A, key(Key::LEFT_CTRL, true));
+    desk.event(A, Event::LocalInputLost);
+    cross_a_to_b(&mut desk, 540);
+    let out = desk.physical(A, key(Key::LEFT_CTRL, false));
+    assert!(out.is_quiet(), "{out:?}");
+    // Ctrl is no longer remembered as held, so Alt+End is typed, not a chord.
+    desk.physical(A, key(Key::LEFT_ALT, true));
+    let out = desk.physical(A, key(Key::END, true));
+    assert!(!sends(out.of(A), PeerMessage::SecureAttention), "{out:?}");
 }

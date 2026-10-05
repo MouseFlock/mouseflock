@@ -35,6 +35,7 @@ crates/
   policy/           managed configuration: schema, signature check, registry source
   win32-input/      hooks, Raw Input, SendInput, cursor clip/warp, DPI     ← unsafe allowed
   win32-clipboard/  clipboard listener, text/DIB/HDROP, file transfer glue  ← unsafe allowed
+  win32-session/    sessions, tokens, launching agents, pipe ACLs, SendSAS   ← unsafe allowed (ADR 0006)
 bin/
   service/          deskhop-service.exe
   agent/            deskhop-agent.exe
@@ -48,15 +49,15 @@ tools/              fuzzers, packet capture, event replay
 ## Dependency rules — enforced, not aspirational
 
 1. `engine` depends on `model`, `proto`, `policy`. It never depends on `win32-*`, `transport`, or `ipc`. It must build and test on Linux.
-2. Only `bin/agent` links `win32-input` and `win32-clipboard`. The service does not touch input.
-3. `#![forbid(unsafe_code)]` in every crate except `win32-input` and `win32-clipboard`. Every `unsafe` block has a `// SAFETY:` comment.
+2. Only `bin/agent` links `win32-input` and `win32-clipboard`. The service does not touch input. Only `bin/service` links `win32-session`.
+3. `#![forbid(unsafe_code)]` in every crate except `win32-input`, `win32-clipboard` and `win32-session`. Every `unsafe` block has a `// SAFETY:` comment.
 4. `proto` and `ipc` are versioned from the first commit. Service, agents, and UI can be mid-upgrade at different versions.
 
 ## Win32 rules
 
 - Hook procedures do nothing but enqueue. Windows silently unhooks a slow low-level hook.
 - Per-monitor DPI awareness v2. Work in virtual-screen coordinates.
-- Every spawn into a session or the secure desktop goes through one function in `bin/service`. No ad-hoc `CreateProcess`.
+- Every spawn into a session or the secure desktop goes through one function in `bin/service` (`launch::agent`). No ad-hoc `CreateProcess`.
 - The installer opens the firewall rule and registers the service. The user never does either.
 
 ## Commands
@@ -66,6 +67,10 @@ cargo build --workspace
 cargo test --workspace                 # on Windows
 cargo test -p proto -p model -p engine -p policy -p pairing -p ipc   # on Linux CI
 cargo clippy --workspace -- -D warnings
+cargo archcheck                        # dependency and unsafe rules
+cargo build -p deskhop-agent; cargo run -p deskhop-service -- --console   # dev loop: pair, cross, type `help`
+tools\dev\service.ps1 install|start|status|log|stop|uninstall             # registered service; elevated shell, run by the user
+cargo check -p transport -p win32-input -p win32-session -p deskhop-agent -p deskhop-service --target aarch64-pc-windows-msvc
 cd apps/desktop && npm run tauri dev
 ```
 

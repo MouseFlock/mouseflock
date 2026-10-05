@@ -1,8 +1,9 @@
 //! Enforces the dependency rules in AGENTS.md against `cargo metadata`.
 //!
 //! 1. `engine` never reaches `win32-*`, `transport`, or `ipc`, directly or not.
-//! 2. Only `deskhop-agent` depends on `win32-input` and `win32-clipboard`.
-//! 3. Every lib and bin root except the two `win32-*` crates has
+//! 2. Only `deskhop-agent` depends on `win32-input` and `win32-clipboard`, and
+//!    only `deskhop-service` on `win32-session` (ADR 0006).
+//! 3. Every lib and bin root except the three `win32-*` crates has
 //!    `#![forbid(unsafe_code)]`.
 //!
 //! Run with `cargo archcheck`.
@@ -14,9 +15,20 @@ use std::process::{Command, ExitCode};
 
 use serde_json::Value;
 
-const UNSAFE_CRATES: [&str; 2] = ["win32-input", "win32-clipboard"];
-const ENGINE_FORBIDDEN: [&str; 4] = ["win32-input", "win32-clipboard", "transport", "ipc"];
-const INPUT_LINKER: &str = "deskhop-agent";
+const UNSAFE_CRATES: [&str; 3] = ["win32-input", "win32-clipboard", "win32-session"];
+const ENGINE_FORBIDDEN: [&str; 5] = [
+    "win32-input",
+    "win32-clipboard",
+    "win32-session",
+    "transport",
+    "ipc",
+];
+/// Each `unsafe` crate and the one package allowed to depend on it.
+const ONLY_LINKER: [(&str, &str); 3] = [
+    ("win32-input", "deskhop-agent"),
+    ("win32-clipboard", "deskhop-agent"),
+    ("win32-session", "deskhop-service"),
+];
 
 struct Package {
     deps: BTreeSet<String>,
@@ -40,13 +52,10 @@ fn main() -> ExitCode {
     }
 
     for (name, pkg) in &packages {
-        if name == INPUT_LINKER {
-            continue;
-        }
-        for dep in UNSAFE_CRATES.iter().filter(|d| pkg.deps.contains(**d)) {
-            errors.push(format!(
-                "`{name}` depends on `{dep}`; only `{INPUT_LINKER}` may"
-            ));
+        for (dep, linker) in ONLY_LINKER {
+            if name != linker && pkg.deps.contains(dep) {
+                errors.push(format!("`{name}` depends on `{dep}`; only `{linker}` may"));
+            }
         }
     }
 
