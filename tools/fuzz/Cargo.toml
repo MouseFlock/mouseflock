@@ -11,6 +11,7 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 proto = { path = "../../crates/proto" }
+ipc = { path = "../../crates/ipc" }
 
 # Excluded from the main workspace: cargo-fuzz needs nightly Rust.
 [workspace]
@@ -25,6 +26,13 @@ bench = false
 [[bin]]
 name = "decode_datagram"
 path = "fuzz_targets/decode_datagram.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "decode_ipc"
+path = "fuzz_targets/decode_ipc.rs"
 test = false
 doc = false
 bench = false

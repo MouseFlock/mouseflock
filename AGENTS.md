@@ -64,7 +64,7 @@ tools/              fuzzers, packet capture, event replay
 ```
 cargo build --workspace
 cargo test --workspace                 # on Windows
-cargo test -p proto -p model -p engine -p policy -p pairing   # on Linux CI
+cargo test -p proto -p model -p engine -p policy -p pairing -p ipc   # on Linux CI
 cargo clippy --workspace -- -D warnings
 cd apps/desktop && npm run tauri dev
 ```

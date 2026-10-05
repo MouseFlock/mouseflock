@@ -11,6 +11,10 @@ ipc.workspace = true
 model.workspace = true
 win32-clipboard.workspace = true
 win32-input.workspace = true
+tokio = { workspace = true, features = ["rt", "net", "time", "sync", "macros"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "net", "time", "sync", "macros"] }
 
 [lints]
 workspace = true

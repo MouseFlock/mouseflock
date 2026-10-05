@@ -291,13 +291,90 @@ Sent as the QUIC application error code when closing a connection.
 
 ## IPC protocol
 
-Shape: ADR 0002. Service, agents, and UI may run different versions during an upgrade.
+Shape: ADR 0002. Service, agents, and UI may run different versions during an upgrade. Normative requirements: `openspec/specs/ipc-protocol/spec.md` and `openspec/specs/agent-link/spec.md`. All integers are little-endian.
 
-No messages are defined yet.
+### IPC frames
+
+```
++----------------+--------------+-------------------+
+| len: u32le     | type: u16le  | payload: len bytes|
++----------------+--------------+-------------------+
+```
+
+- The same shape as peer stream frames, but with its own registry and version. `len` counts the payload only, and must not exceed 65,536. A larger value is rejected from the header alone.
+- Pipes carry no close codes. An end that finds an error closes the pipe, and the service logs why.
+
+### Hello and roles
+
+```
+Hello payload (type 0x0001):
++-------------+-------------+----------+--------------------------------------+
+| min: u16le  | max: u16le  | role: u8 | fields from later versions (ignored) |
++-------------+-------------+----------+--------------------------------------+
+```
+
+- Each end sends `Hello` as its first frame at once, without waiting. Both then use the highest version in both ranges, and close the pipe if there is none.
+- *Roles:* `1` session agent, `2` winlogon agent, `3` UI, `4` service. The service end of an agent link accepts only `1`, and an agent accepts only `4`.
+- *Protocol errors:* a first frame that is not `Hello`, a second `Hello`, `min` = 0, `min` > `max`, or an undefined role.
+
+### IPC message types
+
+A type not defined in the agreed version, or travelling in a direction its type does not allow, is a protocol error. Every payload must match its layout exactly, except `Hello`'s trailing bytes.
+
+| Type | Name | Direction | Since | Payload | Bytes |
+|---|---|---|---|---|---|
+| `0x0000` | reserved | — | — | Never valid. | — |
+| `0x0001` | `Hello` | both | 1 | See above. | ≥ 5 |
+| `0x0010` | `KeyEvent` | agent → service | 1 | at: u64, origin: u8, usage: u16, down: u8 | 12 |
+| `0x0011` | `ButtonEvent` | agent → service | 1 | at: u64, origin: u8, button: u8, down: u8 | 11 |
+| `0x0012` | `WheelEvent` | agent → service | 1 | at: u64, origin: u8, dx: i32, dy: i32 | 17 |
+| `0x0013` | `MotionEvent` | agent → service | 1 | at: u64, origin: u8, dx: i32, dy: i32, x: i32, y: i32 | 25 |
+| `0x0014` | `Screen` | agent → service | 1 | n: u8, then n monitors (below) | 1 + Σ(22 + id_len) |
+| `0x0015` | `Pong` | agent → service | 1 | service_time: u64, agent_time: u64 | 16 |
+| `0x0020` | `SetCapture` | service → agent | 1 | mode: u8 | 1 |
+| `0x0021` | `InjectKey` | service → agent | 1 | usage: u16, down: u8 | 3 |
+| `0x0022` | `InjectButton` | service → agent | 1 | button: u8, down: u8 | 2 |
+| `0x0023` | `InjectWheel` | service → agent | 1 | dx: i32, dy: i32 | 8 |
+| `0x0024` | `InjectMotion` | service → agent | 1 | dx: i32, dy: i32 | 8 |
+| `0x0025` | `Warp` | service → agent | 1 | x: i32, y: i32 | 8 |
+| `0x0026` | `Ping` | service → agent | 1 | service_time: u64 | 8 |
+
+**Codes:** origin `0` physical, `1` injected. Down `0` released, `1` pressed. Button `0` left, `1` right, `2` middle, `3` X1, `4` X2. Mode `0` pass all, `1` withhold all, `2` withhold mouse. Any other value is a protocol error.
+
+**Fields:**
+- *usage:* a USB HID keyboard-page usage.
+- *dx, dy (motion):* raw device movement.
+- *x, y:* the cursor in virtual-screen physical pixels.
+- *Wheel:* in 1/120 of a notch.
+- *at:* milliseconds on the agent's monotonic clock (the performance counter).
+
+**`Screen` monitors:**
+
+```
++-------------+-------------+--------+--------+--------+--------+----------+
+| id_len: u16 | id: UTF-8   | x: i32 | y: i32 | w: i32 | h: i32 | dpi: u32 |
++-------------+-------------+--------+--------+--------+--------+----------+
+```
+
+Limits: at most 32 monitors; `id_len` from 1 to 256; `w` and `h` at least 1; `x + w` and `y + h` within `i32`; `dpi` from 48 to 960. A screen that breaks a limit is a protocol error.
+
+### Clock alignment
+
+- The service sends `Ping(t0)` with its own clock reading as soon as the link is up, and every 10 s after. The agent answers at once with `Pong(t0, a)`, where `a` is its own clock.
+- On receiving the `Pong` at `t1`, the service computes `offset = a − (t0 + t1) / 2` and keeps the estimate from the exchange with the smallest `t1 − t0`.
+- An agent time `at` becomes `at − offset` on the service's clock, clamped at 0.
+- Until the first `Pong`, the service holds the agent's events in order (at most 10,000; more closes the link) and does not report them.
+
+### Agent link behavior
+
+- The service starts the session agent as `deskhop-agent.exe --session --pipe <name>`. The agent connects, exchanges `Hello`, and only then starts capturing input.
+- The agent exits with code `3` if it cannot open the pipe, `4` if the handshake fails, and `5` if capture cannot start.
+- When the link ends for any reason, the agent returns capture to pass all, removes its hooks, and exits.
+- Sending a command never waits. If more than 4,096 commands are queued for an agent that is not reading, the service closes the link.
 
 ## Version history
 
 | Protocol | Version | Change |
 |---|---|---|
 | Peer | 1 | Stream frames, datagrams, message-type registry, `Hello` version negotiation, close reasons, pairing (`PairPake`, `PairConfirm`), desk membership (`MemberRecord`, `RecordsDone`), transport (port 47391, identity certificates, ALPNs, control stream, member connections, one connection per pair, liveness, mDNS), close reason `5`, engine messages (`0x0006`–`0x000F`) and `Motion` datagrams (`0x0010`). Version 1 has not shipped, so these are added without a version bump. |
-| IPC | 1 | Initial version; no messages. |
+| IPC | 1 | Frames, `Hello` with roles and version negotiation, the message registry with directions, and the agent link (input and screen reports, `SetCapture`, injection, warp, `Ping`/`Pong` clock alignment). Version 1 has not shipped, so this fills it in without a version bump. |
