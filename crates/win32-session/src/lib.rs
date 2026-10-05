@@ -1,0 +1,34 @@
+//! Sessions, tokens, launching agents, pipe ACLs, the data folder, `SendSAS`.
+//!
+//! One of three crates where `unsafe` is allowed (ADR 0006). Every `unsafe`
+//! block carries a `// SAFETY:` comment. Linked only by `bin/service`, which
+//! stays `#![forbid(unsafe_code)]`. Nothing here touches input.
+//!
+//! Each Win32 call sits behind a small safe function:
+//!
+//! | Function | For |
+//! |---|---|
+//! | [`active_console_session`], [`user_token`], [`Token::user_sid`], [`own_sid`] | which session and user get an agent |
+//! | [`launch_as`], [`Process`] | starting the agent as the session user |
+//! | [`create_agent_pipe`], [`client_process_id`] | the agent's pipe and who connected to it |
+//! | [`secure_folder`], [`create_admin_readable`] | the service's data folder, and its log |
+//! | [`sas_policy`], [`send_sas`] | the secure attention screen |
+//!
+//! Calls that need SYSTEM (`user_token`, `launch_as` with a user token,
+//! `secure_folder`) fail with an error, never a panic, when run as anyone
+//! else.
+
+mod folder;
+mod handle;
+mod pipe;
+mod process;
+mod sas;
+mod sid;
+mod token;
+
+pub use folder::{Prepared, create_admin_readable, secure_folder};
+pub use pipe::{agent_pipe_sddl, client_process_id, create_agent_pipe};
+pub use process::{Process, command_line, launch_as};
+pub use sas::{SAS_POLICY_KEY, SAS_POLICY_VALUE, allows_services, sas_policy, send_sas};
+pub use sid::{ADMINISTRATORS, GUESTS, SYSTEM, Sid, is_trusted_owner};
+pub use token::{SessionId, Token, TokenError, active_console_session, own_sid, user_token};

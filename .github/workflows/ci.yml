@@ -30,7 +30,7 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
       # ring builds C code; for ARM64 it needs clang, which the runner has.
-      - run: cargo check -p transport -p win32-input -p deskhop-agent --target aarch64-pc-windows-msvc
+      - run: cargo check -p transport -p win32-input -p win32-session -p deskhop-agent -p deskhop-service --target aarch64-pc-windows-msvc
 
   # engine and its dependencies must build and test off Windows.
   linux:

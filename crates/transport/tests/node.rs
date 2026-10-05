@@ -400,6 +400,28 @@ async fn ninth_stranger() {
 // ---- 4.9 -----------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread")]
+async fn addresses_reported_after_pairing() {
+    // Both sides learn the other's address during pairing, so both must
+    // report it for storage, the inviter included.
+    let (mut joiner, mut inviter) = (node(machine("J")), node(machine("I")));
+    pair(&mut joiner, &mut inviter).await;
+    let (j, i) = (joiner.id, inviter.id);
+    let (jaddr, iaddr) = (joiner.addr, inviter.addr);
+    joiner
+        .saw(
+            SECOND,
+            |e| matches!(e, Event::Addresses(a) if a.get(&i) == Some(&iaddr)),
+        )
+        .await;
+    inviter
+        .saw(
+            SECOND,
+            |e| matches!(e, Event::Addresses(a) if a.get(&j) == Some(&jaddr)),
+        )
+        .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn restart_on_a_network_without_multicast() {
     let (mut ma, mut mb) = (machine("A"), machine("B"));
     befriend(&mut ma, &mut mb);

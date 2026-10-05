@@ -26,6 +26,7 @@ transport = { path = "crates/transport" }
 ipc = { path = "crates/ipc" }
 win32-input = { path = "crates/win32-input" }
 win32-clipboard = { path = "crates/win32-clipboard" }
+win32-session = { path = "crates/win32-session" }
 
 # External crates. Versions are pinned here; crates opt in with `workspace = true`
 # only when they use one. proto, model, and engine are the audit surface: adding
