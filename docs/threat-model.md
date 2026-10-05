@@ -1,6 +1,6 @@
 # DeskHop threat model
 
-*Status: covers the wire, pairing, desk membership, the LAN transport, and forwarded input. The named-pipe and secure-desktop boundaries are filled in with `ipc`.*
+*Status: covers the wire, pairing, desk membership, the LAN transport, forwarded input, and the agent → service pipe. The UI pipe and the secure desktop are filled in with their changes.*
 
 DeskHop injects keystrokes received over the network, and its service runs as SYSTEM. This document records what it defends against and where.
 
@@ -15,7 +15,7 @@ DeskHop injects keystrokes received over the network, and its service runs as SY
 | Boundary | Less trusted side | Notes |
 |---|---|---|
 | LAN → service | Any host on the network | Unauthenticated packets reach `proto` decoding as SYSTEM. |
-| Named pipe → service | Agents, UI | The service validates everything it receives (ADR 0002). |
+| Named pipe → service | Agents, UI | The service validates everything it receives (ADR 0002). Agent link: see "Agent → service". |
 | Service → winlogon agent | — | Agent runs as SYSTEM on the secure desktop. |
 
 ## Threats
@@ -79,6 +79,20 @@ Engine messages and `Motion` datagrams can move focus, type and click on a machi
 - **No new power for a member.** A member already counts as trusted to drive input. Its input reaches a machine's OS only while that machine's engine has accepted it as the controller, through `FocusEnter` and the crossing rules. The local user takes control back with a key press or deliberate mouse movement (`input-focus`). Running totals can carry arbitrarily large movement, but a member could already send it as many smaller moves.
 
 Residual risk: a compromised member can push focus onto a machine whose layout maps an edge to it, and type there until the local user takes control back. This is the same trust a member has always had; removing the member ends it.
+
+### Agent → service (named pipe)
+
+The session agent runs as the logged-in user and reports every key and mouse event to the SYSTEM service, which forwards physical input to peers. The service treats the agent as less trusted (ADR 0002). Specified in `openspec/specs/ipc-protocol/spec.md` and `openspec/specs/agent-link/spec.md`.
+
+- **Strict decoding, bounded memory.** IPC frames are capped at 65,536 bytes, checked from the header alone. Every payload has a fixed layout, except `Screen`, whose count, identity lengths, rectangles and DPI are all bounded. Decoding is under the same no-panic lints as `proto`, with a never-panic test and a nightly fuzz target (`decode_ipc`).
+- **Direction and role are checked.** An agent cannot send a service command, and the service end of an agent link accepts only the session-agent role.
+- **A stalled or hostile agent cannot block the service.** The service reads into a buffer holding at most one frame. Sending a command never waits, and an agent that stops reading is cut off after 4,096 queued commands. Events waiting for the first clock exchange are capped at 10,000.
+- **The link ending releases input.** The agent returns capture to pass-all and removes its hooks when the link ends. If the agent dies, Windows removes its hooks. Input is never left withheld without a service.
+
+Open item, closed by `add-service`: today nothing checks which process connects to an agent pipe, so a process that reached it could claim physical input, which the service would forward to peers. `add-service` closes this:
+- each agent's pipe gets a random name, created before the agent starts, with `FILE_FLAG_FIRST_PIPE_INSTANCE`;
+- its ACL allows only SYSTEM and that session's user;
+- the service accepts only the process ID it launched (`GetNamedPipeClientProcessId`).
 
 ### Identity key at rest
 

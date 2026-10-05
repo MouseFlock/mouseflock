@@ -723,6 +723,7 @@ version = "0.1.0"
 dependencies = [
  "ipc",
  "model",
+ "tokio",
  "win32-clipboard",
  "win32-input",
 ]
@@ -1749,6 +1750,10 @@ dependencies = [
 [[package]]
 name = "ipc"
 version = "0.1.0"
+dependencies = [
+ "model",
+ "tokio",
+]
 
 [[package]]
 name = "ipnet"
