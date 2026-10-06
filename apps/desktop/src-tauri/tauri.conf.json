@@ -12,7 +12,29 @@
   },
   "app": {
     "windows": [
-      { "title": "DeskHop", "width": 800, "height": 600 }
+      {
+        "label": "main",
+        "title": "DeskHop",
+        "width": 440,
+        "height": 600,
+        "minWidth": 360,
+        "minHeight": 480,
+        "center": true,
+        "visible": false
+      },
+      {
+        "label": "undo",
+        "title": "DeskHop",
+        "width": 360,
+        "height": 96,
+        "resizable": false,
+        "decorations": false,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "focus": false,
+        "focusable": false,
+        "visible": false
+      }
     ],
     "security": {
       "csp": "default-src 'self'; connect-src ipc: http://ipc.localhost"

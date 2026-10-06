@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-forget-layout"
+description = "Enables the forget_layout command without any pre-configured scope."
+commands.allow = ["forget_layout"]
+
+[[permission]]
+identifier = "deny-forget-layout"
+description = "Denies the forget_layout command without any pre-configured scope."
+commands.deny = ["forget_layout"]

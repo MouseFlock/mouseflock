@@ -36,6 +36,7 @@ crates/
   win32-input/      hooks, Raw Input, SendInput, cursor clip/warp, DPI     ← unsafe allowed
   win32-clipboard/  clipboard listener, text/DIB/HDROP, file transfer glue  ← unsafe allowed
   win32-session/    sessions, tokens, launching agents, pipe ACLs, SendSAS   ← unsafe allowed (ADR 0006)
+  win32-shell/      the UI's Win32 calls: pipe server session check          ← unsafe allowed (ADR 0007)
 bin/
   service/          deskhop-service.exe
   agent/            deskhop-agent.exe
@@ -49,8 +50,8 @@ tools/              fuzzers, packet capture, event replay
 ## Dependency rules — enforced, not aspirational
 
 1. `engine` depends on `model`, `proto`, `policy`. It never depends on `win32-*`, `transport`, or `ipc`. It must build and test on Linux.
-2. Only `bin/agent` links `win32-input` and `win32-clipboard`. The service does not touch input. Only `bin/service` links `win32-session`.
-3. `#![forbid(unsafe_code)]` in every crate except `win32-input`, `win32-clipboard` and `win32-session`. Every `unsafe` block has a `// SAFETY:` comment.
+2. Only `bin/agent` links `win32-input` and `win32-clipboard`. The service does not touch input. Only `bin/service` links `win32-session`. Only `apps/desktop/src-tauri` links `win32-shell`.
+3. `#![forbid(unsafe_code)]` in every crate except `win32-input`, `win32-clipboard`, `win32-session` and `win32-shell`. Every `unsafe` block has a `// SAFETY:` comment.
 4. `proto` and `ipc` are versioned from the first commit. Service, agents, and UI can be mid-upgrade at different versions.
 
 ## Win32 rules
@@ -70,8 +71,9 @@ cargo clippy --workspace -- -D warnings
 cargo archcheck                        # dependency and unsafe rules
 cargo build -p deskhop-agent; cargo run -p deskhop-service -- --console   # dev loop: pair, cross, type `help`
 tools\dev\service.ps1 install|start|status|log|stop|uninstall             # registered service; elevated shell, run by the user
-cargo check -p transport -p win32-input -p win32-session -p deskhop-agent -p deskhop-service --target aarch64-pc-windows-msvc
-cd apps/desktop && npm run tauri dev
+cargo check -p transport -p win32-input -p win32-session -p win32-shell -p deskhop-agent -p deskhop-service -p deskhop-desktop --target aarch64-pc-windows-msvc
+cd apps/desktop && npm run tauri dev    # dev build trusts a console-mode service in this session
+cd apps/desktop && npm test             # React tests
 ```
 
 ## Conventions

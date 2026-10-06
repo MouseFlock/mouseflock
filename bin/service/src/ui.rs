@@ -16,8 +16,6 @@ use crate::host::UiLink;
 use crate::log::Log;
 use crate::{info, warn};
 
-pub const UI_PIPE: &str = r"\\.\pipe\deskhop-ui";
-
 /// How often to try again while another process holds the name.
 pub const RETRY: Duration = Duration::from_secs(5);
 

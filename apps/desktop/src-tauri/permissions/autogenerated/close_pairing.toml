@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-close-pairing"
+description = "Enables the close_pairing command without any pre-configured scope."
+commands.allow = ["close_pairing"]
+
+[[permission]]
+identifier = "deny-close-pairing"
+description = "Denies the close_pairing command without any pre-configured scope."
+commands.deny = ["close_pairing"]

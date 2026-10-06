@@ -1,0 +1,194 @@
+:root {
+  --bg: #f7f7f8;
+  --fg: #1b1b1f;
+  --muted: #5f6068;
+  --line: #dcdce0;
+  --accent: #2563eb;
+  --accent-fg: #ffffff;
+  --up: #16a34a;
+  --down: #9ca3af;
+  --alert: #b91c1c;
+  font-family: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  font-size: 14px;
+  color-scheme: light dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #1e1f22;
+    --fg: #ececf0;
+    --muted: #a2a3ab;
+    --line: #3a3b40;
+    --accent: #4f8cff;
+    --accent-fg: #0b0c0e;
+    --up: #4ade80;
+    --down: #6b7280;
+    --alert: #f87171;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+}
+
+main {
+  padding: 20px 24px;
+}
+
+header h1 {
+  margin: 0 0 4px;
+  font-size: 22px;
+  font-weight: 600;
+}
+
+h2 {
+  font-size: 16px;
+  font-weight: 600;
+  margin: 20px 0 8px;
+}
+
+p {
+  margin: 8px 0;
+}
+
+[role="status"],
+.focus,
+.empty,
+.left {
+  color: var(--muted);
+}
+
+[role="alert"] {
+  color: var(--alert);
+}
+
+button {
+  font: inherit;
+  padding: 6px 14px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--fg);
+  cursor: pointer;
+}
+
+button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-fg);
+}
+
+button.link {
+  border: none;
+  padding: 6px 0;
+  color: var(--accent);
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.actions,
+.confirm {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 12px 0;
+}
+
+.members {
+  list-style: none;
+  margin: 16px 0;
+  padding: 0;
+}
+
+.members li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.members .name {
+  font-weight: 600;
+}
+
+.members .short {
+  font-family: Consolas, monospace;
+  color: var(--muted);
+}
+
+.members .state {
+  flex: 1;
+  color: var(--muted);
+}
+
+.members .confirm {
+  margin: 0;
+}
+
+.dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+
+.dot.up {
+  background: var(--up);
+}
+
+.dot.down {
+  background: var(--down);
+}
+
+.code {
+  font-family: Consolas, monospace;
+  font-size: 32px;
+  letter-spacing: 2px;
+  margin: 12px 0;
+}
+
+label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+input {
+  font: inherit;
+  font-family: Consolas, monospace;
+  font-size: 18px;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--fg);
+}
+
+.secondary {
+  margin-top: 24px;
+}
+
+/* The Undo popup: the whole window is the card. */
+body[data-window="undo"] {
+  overflow: hidden;
+  border: 1px solid var(--line);
+}
+
+.popup {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  height: 100vh;
+  padding: 0 16px;
+}
