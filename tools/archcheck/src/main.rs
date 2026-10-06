@@ -2,8 +2,9 @@
 //!
 //! 1. `engine` never reaches `win32-*`, `transport`, or `ipc`, directly or not.
 //! 2. Only `deskhop-agent` depends on `win32-input` and `win32-clipboard`, and
-//!    only `deskhop-service` on `win32-session` (ADR 0006).
-//! 3. Every lib and bin root except the three `win32-*` crates has
+//!    only `deskhop-service` on `win32-session` (ADR 0006), and only
+//!    `deskhop-desktop` on `win32-shell` (ADR 0007).
+//! 3. Every lib and bin root except the four `win32-*` crates has
 //!    `#![forbid(unsafe_code)]`.
 //!
 //! Run with `cargo archcheck`.
@@ -15,19 +16,26 @@ use std::process::{Command, ExitCode};
 
 use serde_json::Value;
 
-const UNSAFE_CRATES: [&str; 3] = ["win32-input", "win32-clipboard", "win32-session"];
-const ENGINE_FORBIDDEN: [&str; 5] = [
+const UNSAFE_CRATES: [&str; 4] = [
     "win32-input",
     "win32-clipboard",
     "win32-session",
+    "win32-shell",
+];
+const ENGINE_FORBIDDEN: [&str; 6] = [
+    "win32-input",
+    "win32-clipboard",
+    "win32-session",
+    "win32-shell",
     "transport",
     "ipc",
 ];
 /// Each `unsafe` crate and the one package allowed to depend on it.
-const ONLY_LINKER: [(&str, &str); 3] = [
+const ONLY_LINKER: [(&str, &str); 4] = [
     ("win32-input", "deskhop-agent"),
     ("win32-clipboard", "deskhop-agent"),
     ("win32-session", "deskhop-service"),
+    ("win32-shell", "deskhop-desktop"),
 ];
 
 struct Package {

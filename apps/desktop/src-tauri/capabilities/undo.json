@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "undo",
+  "description": "The Undo popup: it may read the view and send Undo, nothing else.",
+  "windows": ["undo"],
+  "permissions": ["core:default", "allow-view", "allow-undo"]
+}

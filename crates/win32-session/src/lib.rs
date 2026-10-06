@@ -1,6 +1,6 @@
 //! Sessions, tokens, launching agents, pipe ACLs, the data folder, `SendSAS`.
 //!
-//! One of three crates where `unsafe` is allowed (ADR 0006). Every `unsafe`
+//! One of four crates where `unsafe` is allowed (ADR 0006). Every `unsafe`
 //! block carries a `// SAFETY:` comment. Linked only by `bin/service`, which
 //! stays `#![forbid(unsafe_code)]`. Nothing here touches input.
 //!

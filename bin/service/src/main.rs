@@ -119,7 +119,7 @@ pub async fn start(
     .map_err(|e| e.to_string())?;
     crate::info!(log, "listening on {}", running.node.local_addr());
     let ui_task = tokio::spawn(ui::serve(
-        ui::UI_PIPE.to_owned(),
+        ipc::ui::PIPE_NAME.to_owned(),
         admit,
         place,
         uis_tx,

@@ -1,7 +1,17 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Permissions for the main window.",
+  "description": "The main window: every DeskHop command.",
   "windows": ["main"],
-  "permissions": ["core:default"]
+  "permissions": [
+    "core:default",
+    "allow-view",
+    "allow-route",
+    "allow-open-pairing",
+    "allow-close-pairing",
+    "allow-join",
+    "allow-remove-peer",
+    "allow-undo",
+    "allow-forget-layout"
+  ]
 }

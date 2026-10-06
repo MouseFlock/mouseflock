@@ -1,6 +1,6 @@
 # DeskHop threat model
 
-*Status: covers the wire, pairing, desk membership, the LAN transport, forwarded input, the agent → service and UI → service pipes, the service's data folder, console mode and secure attention. The secure desktop is filled in with its change.*
+*Status: covers the wire, pairing, desk membership, the LAN transport, forwarded input, the agent → service and UI → service pipes, the UI app, the service's data folder, console mode and secure attention. The secure desktop is filled in with its change.*
 
 DeskHop injects keystrokes received over the network, and its service runs as SYSTEM. This document records what it defends against and where.
 
@@ -117,12 +117,16 @@ A UI can pair this machine with another, remove members, and change the learned 
 - **Pipe squatting.** A process that created `\\.\pipe\deskhop-ui` before the service could pose as the service to UIs: show a wrong code, or collect a typed one.
   - The service starts at boot and creates the name as the first instance before anyone logs on. It keeps one instance listening at all times, so the name never falls free while it runs.
   - If the name is taken at start, the service logs it and retries every 5 seconds.
-  - Open item, closed by `add-onboarding`: the UI must check that the pipe's server runs in session 0 (`GetNamedPipeServerSessionId`), where only services run, before trusting anything it reads. A squatter running as a user cannot run in session 0.
+  - **The UI checks the server before sending anything.** Before its `Hello`, `DeskHop.exe` asks for the session of the process serving the pipe (`GetNamedPipeServerSessionId`, in `win32-shell`, ADR 0007). It goes on only if that is session 0, where only services run; anything else is dropped unread, and the UI shows that the service isn't running. A squatter running as a user cannot run in session 0, and a process in session 0 is a service an administrator installed, who is outside this threat model. Specified in `openspec/specs/desktop-app/spec.md`.
+  - **Development builds** also accept a server in their own session, so they work with `deskhop-service --console`. Release builds, the only ones the installer ships, never do.
+
+**The UI app itself** (`DeskHop.exe`) runs as the user and holds no keys. Pairing codes pass through it only as they are shown or typed.
+- **The webview** loads only the app's own pages (CSP `default-src 'self'`), never remote content. It can call only DeskHop's own commands; no file, shell or HTTP plugin is included. The Undo popup's window may call only `view` and `undo`.
+- **Start with Windows** is a value under the user's own `Run` key. Anything running as the user could change it, but such a process could already run anything as that user.
 
 Residual risks:
 
 - **Pairing by anyone at the console.** On a shared or family PC, any user who can log on can pair a machine of their choosing. Removing it again is just as easy for the owner.
-- **A squatter before the service starts.** Until `add-onboarding` adds the UI's session-0 check, a user process started before the service (only possible if the service is stopped or not yet started) could answer UIs.
 
 ### Identity key at rest
 
@@ -138,7 +142,7 @@ Defenses for the data folder (`%ProgramData%\DeskHop`), specified in `openspec/s
 
 ### Console mode (development)
 
-`deskhop-service --console` runs as the logged-in user and keeps its data in the user's profile (`%LOCALAPPDATA%\DeskHop\console`), never in the service's folder. Its identity and trust store are therefore as safe as the user's own files: any process running as that user can read them, and could pose as this console-mode machine to its peers. It is a development tool, used until the UI exists, and the registered service never reads its files.
+`deskhop-service --console` runs as the logged-in user and keeps its data in the user's profile (`%LOCALAPPDATA%\DeskHop\console`), never in the service's folder. Its identity and trust store are therefore as safe as the user's own files: any process running as that user can read them, and could pose as this console-mode machine to its peers. It is a development tool, and the registered service never reads its files.
 
 ### Secure attention (Ctrl-Alt-Del)
 
