@@ -291,7 +291,7 @@ Sent as the QUIC application error code when closing a connection.
 
 ## IPC protocol
 
-Shape: ADR 0002. Service, agents, and UI may run different versions during an upgrade. Normative requirements: `openspec/specs/ipc-protocol/spec.md` and `openspec/specs/agent-link/spec.md`. All integers are little-endian.
+Shape: ADR 0002. Service, agents, and UI may run different versions during an upgrade. Normative requirements: `openspec/specs/ipc-protocol/spec.md`, `openspec/specs/agent-link/spec.md` and `openspec/specs/ui-link/spec.md`. All integers are little-endian.
 
 ### IPC frames
 
@@ -314,12 +314,12 @@ Hello payload (type 0x0001):
 ```
 
 - Each end sends `Hello` as its first frame at once, without waiting. Both then use the highest version in both ranges, and close the pipe if there is none.
-- *Roles:* `1` session agent, `2` winlogon agent, `3` UI, `4` service. The service end of an agent link accepts only `1`, and an agent accepts only `4`.
+- *Roles:* `1` session agent, `2` winlogon agent, `3` UI, `4` service. The service end of an agent link accepts only `1`, the service end of a UI link only `3`, and agents and UIs accept only `4`.
 - *Protocol errors:* a first frame that is not `Hello`, a second `Hello`, `min` = 0, `min` > `max`, or an undefined role.
 
 ### IPC message types
 
-A type not defined in the agreed version, or travelling in a direction its type does not allow, is a protocol error. Every payload must match its layout exactly, except `Hello`'s trailing bytes.
+A type not defined in the agreed version, or travelling in a direction its type does not allow, is a protocol error. Directions name the link as well: a UI type on an agent link, or an agent type on a UI link, is travelling the wrong way. Every payload must match its layout exactly, except `Hello`'s trailing bytes.
 
 | Type | Name | Direction | Since | Payload | Bytes |
 |---|---|---|---|---|---|
@@ -338,6 +338,18 @@ A type not defined in the agreed version, or travelling in a direction its type 
 | `0x0024` | `InjectMotion` | service → agent | 1 | dx: i32, dy: i32 | 8 |
 | `0x0025` | `Warp` | service → agent | 1 | x: i32, y: i32 | 8 |
 | `0x0026` | `Ping` | service → agent | 1 | service_time: u64 | 8 |
+| `0x0030` | `OpenPairing` | UI → service | 1 | — | 0 |
+| `0x0031` | `ClosePairing` | UI → service | 1 | — | 0 |
+| `0x0032` | `Join` | UI → service | 1 | code | 2–33 |
+| `0x0033` | `RemovePeer` | UI → service | 1 | key | 32 |
+| `0x0034` | `Undo` | UI → service | 1 | — | 0 |
+| `0x0035` | `ForgetLayout` | UI → service | 1 | — | 0 |
+| `0x0038` | `Status` | service → UI | 1 | See "UI link". | ≥ 39 |
+| `0x0039` | `Paired` | service → UI | 1 | key, name | 34–96 |
+| `0x003A` | `JoinFailed` | service → UI | 1 | reason: u8 | 1 |
+| `0x003B` | `PairingClosed` | service → UI | 1 | reason: u8 | 1 |
+| `0x003C` | `PairingNotOpened` | service → UI | 1 | reason: u8 | 1 |
+| `0x003D` | `Learned` | service → UI | 1 | key, side: u8, undo_ms: u32 | 37 |
 
 **Codes:** origin `0` physical, `1` injected. Down `0` released, `1` pressed. Button `0` left, `1` right, `2` middle, `3` X1, `4` X2. Mode `0` pass all, `1` withhold all, `2` withhold mouse. Any other value is a protocol error.
 
@@ -372,9 +384,53 @@ Limits: at most 32 monitors; `id_len` from 1 to 256; `w` and `h` at least 1; `x 
 - When the link ends for any reason, the agent returns capture to pass all, removes its hooks, and exits.
 - Sending a command never waits. If more than 4,096 commands are queued for an agent that is not reading, the service closes the link.
 
+### UI link
+
+The UI connects to `\\.\pipe\deskhop-ui`, which the service creates at start as the first instance of that name. The pipe refuses remote clients and serves at most 8 UIs at once. Its ACL admits SYSTEM and interactive users. In console mode it admits only the user running console mode.
+
+**Fields:**
+- *key:* a machine's 32-byte Ed25519 public key.
+- *name:* `name_len: u8` from 1 to 63, then that many bytes of UTF-8.
+- *code:* `code_len: u8` from 1 to 32, then that many bytes of printable ASCII (`0x21`–`0x7E`). A `Join` carries the code as the user typed it; the service parses it.
+
+**`Status`:**
+
+Fields in order:
+
+```
+key, name                     this machine
+agent: u8
+pairing: u8
+  code, left_ms: u32          only when pairing = 1
+focus: u8
+  key                         only when focus ≠ 0
+n: u16
+  n × (key, name, up: u8)     the members
+```
+
+- *agent:* `0` no agent linked, `1` linked.
+- *pairing:* `0` closed, `1` open; `left_ms` is the time pairing stays open.
+- *focus:* `0` local, `1` this machine's input is on the member `key`, `2` the member `key` controls this machine.
+- *members:* at most 256; `up` is `0` or `1`.
+
+**Codes:**
+- `JoinFailed`: `0` wrong code, `1` not ready, `2` protocol error, `3` desk full, `4` connection lost, `5` unreachable, `6` mistyped code (its check digit is wrong), `7` malformed code.
+- `PairingClosed`: `0` a machine joined, `1` time ran out, `2` closed by the user, `3` too many wrong codes.
+- `PairingNotOpened`: `0` no IPv4 network.
+- *side* (`Learned`): `0` left, `1` right, `2` top, `3` bottom.
+
+Any other value, a name or code outside its limits, or more than 256 members is a protocol error.
+
+**Behavior:**
+- **Who is accepted:** the service accepts a UI only if the connecting process runs in the active console session and sends `Hello` with role `3`. Any other client is closed before it is sent anything but `Hello`.
+- **Status:** after `Hello`, the service sends `Status` at once, and again whenever a field changes, at most once every 100 ms and always with the latest values. Each `Status` is complete.
+- **Notices:** `Paired`, `JoinFailed`, `PairingClosed`, `PairingNotOpened` and `Learned` go to every connected UI when they happen.
+- **Commands:** they act as the console commands do. A `RemovePeer` for a key that is not a member changes nothing.
+- **Never waits:** sending to a UI never waits. A UI with more than 256 unsent messages is disconnected.
+
 ## Version history
 
 | Protocol | Version | Change |
 |---|---|---|
 | Peer | 1 | Stream frames, datagrams, message-type registry, `Hello` version negotiation, close reasons, pairing (`PairPake`, `PairConfirm`), desk membership (`MemberRecord`, `RecordsDone`), transport (port 47391, identity certificates, ALPNs, control stream, member connections, one connection per pair, liveness, mDNS), close reason `5`, engine messages (`0x0006`–`0x000F`) and `Motion` datagrams (`0x0010`). Version 1 has not shipped, so these are added without a version bump. |
-| IPC | 1 | Frames, `Hello` with roles and version negotiation, the message registry with directions, and the agent link (input and screen reports, `SetCapture`, injection, warp, `Ping`/`Pong` clock alignment). Version 1 has not shipped, so this fills it in without a version bump. |
+| IPC | 1 | Frames, `Hello` with roles and version negotiation, the message registry with directions, and the agent link (input and screen reports, `SetCapture`, injection, warp, `Ping`/`Pong` clock alignment). The UI link (`0x0030`–`0x003D`: pairing, join, remove, undo, forget layout, `Status` and notices), with directions per link. Version 1 has not shipped, so these fill it in without a version bump. |

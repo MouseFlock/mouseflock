@@ -209,3 +209,37 @@ fn killed_agent_is_replaced() {
     console.type_line("quit");
     assert!(console.exits_within(WAIT).is_some());
 }
+
+#[test]
+#[ignore = "needs a desktop"]
+fn ui_client_sees_status_and_opens_pairing() {
+    use ipc::link::UiEnd;
+    use ipc::ui::{Pairing, UiCommand, UiEvent};
+    use tokio::net::windows::named_pipe::ClientOptions;
+
+    let mut console = Console::start("ui");
+    console.logged(r"serving UIs on \\.\pipe\deskhop-ui", WAIT);
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    runtime.block_on(async {
+        let pipe = ClientOptions::new().open(r"\\.\pipe\deskhop-ui").unwrap();
+        let (to_service, mut events) = UiEnd::connect(pipe).await.unwrap();
+        let first = tokio::time::timeout(WAIT, events.recv()).await.unwrap();
+        assert!(matches!(first, Some(UiEvent::Status(_))), "{first:?}");
+        to_service.send(UiCommand::OpenPairing).unwrap();
+        let open = tokio::time::timeout(WAIT, async {
+            while let Some(e) = events.recv().await {
+                if let UiEvent::Status(s) = e
+                    && let Pairing::Open { code, .. } = s.pairing
+                {
+                    return code;
+                }
+            }
+            panic!("link closed");
+        })
+        .await
+        .unwrap();
+        assert!(!open.is_empty());
+    });
+    console.type_line("quit");
+    assert!(console.exits_within(WAIT).is_some());
+}

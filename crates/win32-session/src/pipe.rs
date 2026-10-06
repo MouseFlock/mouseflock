@@ -1,4 +1,6 @@
-//! The agent's pipe: one instance, local clients only, SYSTEM and one user.
+//! The agent's pipe (one instance, SYSTEM and one user) and the UI pipe (up
+//! to [`MAX_UI_INSTANCES`], SYSTEM and interactive users or one user). Both
+//! refuse remote clients.
 
 use std::io;
 use std::os::windows::io::AsRawHandle;
@@ -9,11 +11,68 @@ use windows::Win32::Security::Authorization::{
     ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
 };
 use windows::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
-use windows::Win32::System::Pipes::GetNamedPipeClientProcessId;
+use windows::Win32::System::Pipes::{GetNamedPipeClientProcessId, GetNamedPipeClientSessionId};
+use windows::Win32::System::RemoteDesktop::ProcessIdToSessionId;
 use windows::core::PCWSTR;
 
 use crate::handle::{Local, wide};
 use crate::sid::Sid;
+use crate::token::SessionId;
+
+/// Most UI pipe instances, and so UIs connected, at once.
+pub const MAX_UI_INSTANCES: usize = 8;
+
+/// Who may open the UI pipe.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UiAdmit {
+    /// The registered service: SYSTEM and interactive users (`IU`). The
+    /// service then accepts only the console session.
+    InteractiveUsers,
+    /// Console mode: SYSTEM and this one user.
+    User(Sid),
+}
+
+/// The UI pipe's DACL, protected so nothing is inherited.
+pub fn ui_pipe_sddl(admit: &UiAdmit) -> String {
+    match admit {
+        UiAdmit::InteractiveUsers => "D:P(A;;GA;;;SY)(A;;GRGW;;;IU)".to_owned(),
+        UiAdmit::User(user) => agent_pipe_sddl(user),
+    }
+}
+
+/// Creates an instance of the UI pipe `name`. With `first`, it must be the
+/// first instance of that name and fails if the name exists. At most
+/// [`MAX_UI_INSTANCES`] instances can exist; Windows enforces the first
+/// creator's limit on every later one.
+pub fn create_ui_pipe(name: &str, first: bool, admit: &UiAdmit) -> io::Result<NamedPipeServer> {
+    let descriptor = Descriptor::from_sddl(&ui_pipe_sddl(admit))?;
+    let mut attributes = descriptor.attributes();
+    let mut options = ServerOptions::new();
+    options
+        .first_pipe_instance(first)
+        .reject_remote_clients(true)
+        .max_instances(MAX_UI_INSTANCES);
+    // SAFETY: `attributes` is a valid SECURITY_ATTRIBUTES whose descriptor
+    // outlives the call; tokio passes it straight to CreateNamedPipeW.
+    unsafe { options.create_with_security_attributes_raw(name, (&raw mut attributes).cast()) }
+}
+
+/// The session of the client connected to `pipe`.
+pub fn client_session_id(pipe: &NamedPipeServer) -> io::Result<SessionId> {
+    let mut session = 0u32;
+    // SAFETY: the handle stays open for the borrow of `pipe`; `session` is a
+    // valid out-pointer.
+    unsafe { GetNamedPipeClientSessionId(HANDLE(pipe.as_raw_handle()), &mut session) }?;
+    Ok(SessionId(session))
+}
+
+/// This process's session.
+pub fn own_session() -> io::Result<SessionId> {
+    let mut session = 0u32;
+    // SAFETY: `session` is a valid out-pointer.
+    unsafe { ProcessIdToSessionId(std::process::id(), &mut session) }?;
+    Ok(SessionId(session))
+}
 
 /// The pipe's DACL: SYSTEM gets everything, `user` may read and write.
 /// Protected, so nothing is inherited.
@@ -101,6 +160,66 @@ mod tests {
             "D:P(A;;GA;;;SY)(A;;GRGW;;;S-1-5-21-1-2-3-1001)"
         );
         Descriptor::from_sddl(&agent_pipe_sddl(&user)).unwrap();
+    }
+
+    #[test]
+    fn ui_sddl() {
+        assert_eq!(
+            ui_pipe_sddl(&UiAdmit::InteractiveUsers),
+            "D:P(A;;GA;;;SY)(A;;GRGW;;;IU)"
+        );
+        Descriptor::from_sddl(&ui_pipe_sddl(&UiAdmit::InteractiveUsers)).unwrap();
+        let me = crate::own_sid().unwrap();
+        assert_eq!(
+            ui_pipe_sddl(&UiAdmit::User(me.clone())),
+            agent_pipe_sddl(&me)
+        );
+    }
+
+    #[tokio::test]
+    async fn ui_pipe_for_own_user_opens() {
+        let name = name("ui-own");
+        let server =
+            create_ui_pipe(&name, true, &UiAdmit::User(crate::own_sid().unwrap())).unwrap();
+        let _client = ClientOptions::new().open(&name).unwrap();
+        server.connect().await.unwrap();
+        assert_eq!(client_session_id(&server).unwrap(), own_session().unwrap());
+    }
+
+    #[tokio::test]
+    async fn interactive_users_may_open_the_ui_pipe() {
+        // Tests run in an interactive logon, so this user is in `IU`.
+        let name = name("ui-iu");
+        let server = create_ui_pipe(&name, true, &UiAdmit::InteractiveUsers).unwrap();
+        let _client = ClientOptions::new().open(&name).unwrap();
+        server.connect().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn ninth_ui_client_is_busy() {
+        let name = name("ui-nine");
+        let admit = UiAdmit::User(crate::own_sid().unwrap());
+        let mut held = Vec::new();
+        for i in 0..MAX_UI_INSTANCES {
+            let server = create_ui_pipe(&name, i == 0, &admit).unwrap();
+            let client = ClientOptions::new().open(&name).unwrap();
+            server.connect().await.unwrap();
+            held.push((server, client));
+        }
+        // No ninth instance, so a ninth client finds every instance busy.
+        assert!(create_ui_pipe(&name, false, &admit).is_err());
+        let err = ClientOptions::new().open(&name).unwrap_err();
+        assert_eq!(err.raw_os_error(), Some(231), "{err}"); // ERROR_PIPE_BUSY
+    }
+
+    #[tokio::test]
+    async fn first_ui_instance_twice_fails() {
+        let name = name("ui-first");
+        let admit = UiAdmit::User(crate::own_sid().unwrap());
+        let _first = create_ui_pipe(&name, true, &admit).unwrap();
+        assert!(create_ui_pipe(&name, true, &admit).is_err());
+        // A later instance of the same name is fine.
+        let _second = create_ui_pipe(&name, false, &admit).unwrap();
     }
 
     #[tokio::test]

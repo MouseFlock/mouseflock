@@ -7,8 +7,10 @@
 //! - [`message`]: `Hello` with role and version, and the agent link's
 //!   messages, with their directions.
 //! - [`clock`]: aligning the agent's clock with the service's.
-//! - [`link`]: both ends of the agent link as async connections over any
-//!   byte stream.
+//! - [`ui`]: the UI link's messages: commands from a UI, and the service's
+//!   status and notices.
+//! - [`link`]: both ends of the agent link and of the UI link as async
+//!   connections over any byte stream.
 //!
 //! The service trusts nothing an agent sends. Decoding never panics and never
 //! allocates from a length the other end claims; the lints below enforce it.
@@ -30,6 +32,7 @@ pub mod error;
 pub mod frame;
 pub mod link;
 pub mod message;
+pub mod ui;
 
 pub use error::{EncodeError, ProtocolError};
 

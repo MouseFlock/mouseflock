@@ -17,6 +17,7 @@ mod log;
 mod scm;
 mod store;
 mod supervisor;
+mod ui;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -64,10 +65,11 @@ pub struct Service {
     pub supervisor: mpsc::UnboundedSender<SupervisorCommand>,
     host_task: tokio::task::JoinHandle<()>,
     supervisor_task: tokio::task::JoinHandle<()>,
+    ui_task: tokio::task::JoinHandle<()>,
 }
 
-/// Prepares the data folder, loads what is stored, and starts the host
-/// and the supervisor.
+/// Prepares the data folder, loads what is stored, and starts the host,
+/// the supervisor and the UI pipe server.
 pub async fn start(
     console: bool,
     dir: PathBuf,
@@ -87,6 +89,19 @@ pub async fn start(
     let (links_tx, links) = mpsc::unbounded_channel();
     let (host, host_rx) = mpsc::unbounded_channel();
     let (supervisor, supervisor_rx) = mpsc::unbounded_channel();
+    let (uis_tx, uis) = mpsc::unbounded_channel();
+    let (admit, place) = if console {
+        let me =
+            win32_session::own_sid().map_err(|e| format!("cannot read this user's SID: {e}"))?;
+        let session =
+            win32_session::own_session().map_err(|e| format!("cannot read this session: {e}"))?;
+        (
+            win32_session::UiAdmit::User(me),
+            ui::Place::Session(session),
+        )
+    } else {
+        (win32_session::UiAdmit::InteractiveUsers, ui::Place::Console)
+    };
     let running = host::start(
         HostConfig {
             node,
@@ -98,10 +113,19 @@ pub async fn start(
             reports,
         },
         links,
+        uis,
         host_rx,
     )
     .map_err(|e| e.to_string())?;
     crate::info!(log, "listening on {}", running.node.local_addr());
+    let ui_task = tokio::spawn(ui::serve(
+        ui::UI_PIPE.to_owned(),
+        admit,
+        place,
+        uis_tx,
+        log.clone(),
+        ui::RETRY,
+    ));
     let supervisor_task = tokio::spawn(supervisor::run(
         console,
         clock,
@@ -115,6 +139,7 @@ pub async fn start(
         supervisor,
         host_task: running.task,
         supervisor_task,
+        ui_task,
     })
 }
 
@@ -135,6 +160,7 @@ pub async fn stop(service: Service) {
     }
     let _ = service.host_task.await;
     service.supervisor_task.abort();
+    service.ui_task.abort();
 }
 
 fn console_main(data: Option<PathBuf>, port: u16) -> ExitCode {

@@ -1,14 +1,19 @@
-//! The engine loop (design D3): one task owns the engine and connects it to
-//! the session agent's link and the transport node.
+//! The engine loop (add-service design D3): one task owns the engine and
+//! connects it to the session agent's link, the transport node, and every
+//! connected UI (add-ui-link design D4).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use engine::{CaptureMode, Decision, Engine, Event as EngineEvent, FocusView, Tuning};
-use ipc::link::{AgentHandle, FromAgent};
+use ipc::link::{AgentHandle, FromAgent, UiHandle};
 use ipc::message::ToAgent;
+use ipc::ui::{
+    FocusOf, JoinFailedReason, Member, NotOpenedReason, Pairing, PairingClosedReason, Status,
+    UiCommand, UiEvent,
+};
 use model::{LayoutBook, Millis, PeerId, Side};
-use pairing::{Code, Desk, JoinFailure, ModeClosed};
+use pairing::{Code, CodeError, Desk, JoinFailure, MachineName, ModeClosed, WINDOW_MS};
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::Instant;
 use transport::{Down, Event as NodeEvent, NoNetwork, NodeHandle, StartError};
@@ -19,6 +24,9 @@ use crate::{info, warn};
 
 /// How long goodbye may take before sleep or stop.
 pub const GOODBYE_WAIT: Duration = Duration::from_secs(1);
+
+/// UIs get a changed `Status` at most this often.
+pub const STATUS_EVERY: Duration = Duration::from_millis(100);
 
 /// The service's monotonic clock: milliseconds since start. The agent link
 /// converts agent times to it, and `Undo` is stamped with it.
@@ -46,6 +54,18 @@ pub struct AgentLink {
     pub events: mpsc::UnboundedReceiver<FromAgent>,
     #[expect(dead_code, reason = "never sent on; dropping it is the signal")]
     pub ended: oneshot::Sender<()>,
+}
+
+/// A UI's link, handed over by the UI pipe server.
+pub struct UiLink {
+    pub handle: UiHandle,
+    pub commands: mpsc::UnboundedReceiver<UiCommand>,
+}
+
+/// What the per-UI forwarding tasks tell the host.
+enum FromUi {
+    Command(UiCommand),
+    Gone(u64),
 }
 
 /// A member, for `peers`.
@@ -144,17 +164,21 @@ pub fn mode_for(focus: FocusView) -> CaptureMode {
 pub fn start(
     config: HostConfig,
     links: mpsc::UnboundedReceiver<AgentLink>,
+    uis: mpsc::UnboundedReceiver<UiLink>,
     commands: mpsc::UnboundedReceiver<HostCommand>,
 ) -> Result<Running, StartError> {
     let me = config.node.machine.peer_id();
+    let my_name = config.node.machine.name().clone();
     let desk = config.node.machine.desk().clone();
     let (node, node_events) = transport::start(config.node)?;
     let mut engine = Engine::new(me, engine::Config::default());
     engine.handle(EngineEvent::LayoutsLoaded(config.layouts));
+    let (from_ui, from_ui_rx) = mpsc::unbounded_channel();
     let host = Host {
         engine,
         node: node.clone(),
         me,
+        my_name,
         desk,
         up: BTreeSet::new(),
         link: None,
@@ -163,8 +187,13 @@ pub fn start(
         sas: config.sas,
         clock: config.clock,
         reports: config.reports,
+        uis: BTreeMap::new(),
+        next_ui: 0,
+        from_ui,
+        pairing: None,
+        dirty: false,
     };
-    let task = tokio::spawn(host.run(node_events, links, commands));
+    let task = tokio::spawn(host.run(node_events, links, uis, from_ui_rx, commands));
     Ok(Running { node, task })
 }
 
@@ -172,6 +201,7 @@ struct Host {
     engine: Engine,
     node: NodeHandle,
     me: PeerId,
+    my_name: MachineName,
     /// A copy of the membership view, for names.
     desk: Desk,
     up: BTreeSet<PeerId>,
@@ -181,6 +211,14 @@ struct Host {
     sas: Sas,
     clock: Clock,
     reports: Option<mpsc::UnboundedSender<Report>>,
+    /// Connected UIs by their number.
+    uis: BTreeMap<u64, UiHandle>,
+    next_ui: u64,
+    from_ui: mpsc::UnboundedSender<FromUi>,
+    /// The open pairing mode's code, and when it opened.
+    pairing: Option<(Code, Millis)>,
+    /// Something in `Status` changed since UIs were last sent one.
+    dirty: bool,
 }
 
 /// The next event from the current link, or `None` when it ends. Pends
@@ -197,12 +235,24 @@ impl Host {
         mut self,
         mut node_events: mpsc::UnboundedReceiver<NodeEvent>,
         mut links: mpsc::UnboundedReceiver<AgentLink>,
+        mut uis: mpsc::UnboundedReceiver<UiLink>,
+        mut from_ui: mpsc::UnboundedReceiver<FromUi>,
         mut commands: mpsc::UnboundedReceiver<HostCommand>,
     ) {
         info!(self.log, "running as {}", self.short(self.me));
+        let mut status_tick = tokio::time::interval(STATUS_EVERY);
+        status_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             tokio::select! {
                 Some(event) = node_events.recv() => self.on_node(event),
+                Some(ui) = uis.recv() => self.new_ui(ui),
+                Some(event) = from_ui.recv() => match event {
+                    FromUi::Command(command) => self.on_ui(command).await,
+                    FromUi::Gone(id) => {
+                        self.uis.remove(&id);
+                    }
+                },
+                _ = status_tick.tick(), if self.dirty => self.send_status(),
                 event = next_from(&mut self.link) => match event {
                     Some(event) => self.on_agent(event),
                     None => self.link_ended("the agent link closed"),
@@ -248,6 +298,139 @@ impl Host {
         store::hex(&peer.0[..4])
     }
 
+    // ---- UIs ----
+
+    fn new_ui(&mut self, ui: UiLink) {
+        let id = self.next_ui;
+        self.next_ui = self.next_ui.wrapping_add(1);
+        if ui.handle.send(UiEvent::Status(self.status())).is_err() {
+            return;
+        }
+        let UiLink {
+            handle,
+            mut commands,
+        } = ui;
+        self.uis.insert(id, handle);
+        let tx = self.from_ui.clone();
+        tokio::spawn(async move {
+            while let Some(command) = commands.recv().await {
+                if tx.send(FromUi::Command(command)).is_err() {
+                    return;
+                }
+            }
+            let _ = tx.send(FromUi::Gone(id));
+        });
+        info!(self.log, "UI connected ({} now)", self.uis.len());
+    }
+
+    /// Sends `event` to every UI, dropping any whose link has closed or
+    /// that stopped reading.
+    fn broadcast(&mut self, event: &UiEvent) {
+        self.uis
+            .retain(|_, ui| !ui.is_closed() && ui.send(event.clone()).is_ok());
+    }
+
+    fn send_status(&mut self) {
+        self.dirty = false;
+        let status = UiEvent::Status(self.status());
+        self.broadcast(&status);
+    }
+
+    /// Everything a UI shows, from the host's state now.
+    fn status(&self) -> Status {
+        let pairing = match &self.pairing {
+            Some((code, opened)) => Pairing::Open {
+                code: code.to_string(),
+                left_ms: u32::try_from(WINDOW_MS.saturating_sub(self.clock.now().since(*opened)))
+                    .unwrap_or(u32::MAX),
+            },
+            None => Pairing::Closed,
+        };
+        let focus = match self.engine.focus() {
+            FocusView::Local => FocusOf::Local,
+            FocusView::Forwarding(p) => FocusOf::On(p.0),
+            FocusView::Controlled(p) => FocusOf::ControlledBy(p.0),
+        };
+        Status {
+            key: self.me.0,
+            name: self.my_name.as_str().to_owned(),
+            agent_linked: self.link.is_some(),
+            pairing,
+            focus,
+            members: self
+                .desk
+                .members()
+                .take(ipc::ui::MAX_MEMBERS)
+                .map(|(peer, name)| Member {
+                    key: peer.0,
+                    name: name.as_str().to_owned(),
+                    up: self.up.contains(&peer),
+                })
+                .collect(),
+        }
+    }
+
+    async fn on_ui(&mut self, command: UiCommand) {
+        match command {
+            UiCommand::OpenPairing => {
+                let _ = self.open_pairing().await;
+            }
+            UiCommand::ClosePairing => self.node.close_pairing(),
+            UiCommand::Join(text) => match Code::parse(&text) {
+                Ok(code) => self.join(code),
+                Err(e) => {
+                    let reason = match e {
+                        CodeError::CheckDigit => JoinFailedReason::MistypedCode,
+                        _ => JoinFailedReason::MalformedCode,
+                    };
+                    info!(self.log, "join refused: {e}");
+                    self.broadcast(&UiEvent::JoinFailed(reason));
+                }
+            },
+            UiCommand::RemovePeer(key) => {
+                let peer = PeerId(key);
+                if self.desk.is_member(&peer) {
+                    self.remove(peer);
+                }
+            }
+            UiCommand::Undo => self.undo(),
+            UiCommand::ForgetLayout => self.engine(EngineEvent::ForgetLayout),
+        }
+    }
+
+    // ---- actions shared by the console and UIs ----
+
+    async fn open_pairing(&mut self) -> Result<Code, NoNetwork> {
+        let opened = self.node.open_pairing().await;
+        match &opened {
+            Ok(code) => {
+                info!(self.log, "pairing opened");
+                self.pairing = Some((code.clone(), self.clock.now()));
+                self.dirty = true;
+            }
+            Err(e) => {
+                warn!(self.log, "pairing not opened: {e}");
+                self.broadcast(&UiEvent::PairingNotOpened(NotOpenedReason::NoNetwork));
+            }
+        }
+        opened
+    }
+
+    fn join(&mut self, code: Code) {
+        info!(self.log, "joining by code");
+        self.node.join(code);
+    }
+
+    fn remove(&mut self, peer: PeerId) {
+        info!(self.log, "removing {}", self.name(peer));
+        self.node.remove(peer);
+    }
+
+    fn undo(&mut self) {
+        let at = self.clock.now();
+        self.engine(EngineEvent::Undo { at });
+    }
+
     // ---- agent ----
 
     fn new_link(&mut self, link: AgentLink) {
@@ -257,6 +440,7 @@ impl Host {
         let mode = mode_for(self.engine.focus());
         let _ = link.handle.send(ToAgent::SetCapture(mode));
         self.link = Some(link);
+        self.dirty = true;
         info!(self.log, "agent linked");
         self.report(Report::AgentLinked);
     }
@@ -265,6 +449,7 @@ impl Host {
         if self.link.take().is_none() {
             return;
         }
+        self.dirty = true;
         info!(self.log, "agent link ended: {why}");
         self.report(Report::AgentGone);
         self.engine(EngineEvent::LocalInputLost);
@@ -313,6 +498,7 @@ impl Host {
                         _ => info!(self.log, "focus: local"),
                     }
                     self.report(Report::Focus { focus, name });
+                    self.dirty = true;
                 }
                 Decision::LayoutsChanged(book) => {
                     self.store
@@ -322,6 +508,11 @@ impl Host {
                     let name = self.name(peer);
                     let undo_secs = Tuning::DEFAULT.undo_ms / 1000;
                     info!(self.log, "learned {name} to the {}", store::side_name(side));
+                    self.broadcast(&UiEvent::Learned {
+                        key: peer.0,
+                        side,
+                        undo_ms: u32::try_from(Tuning::DEFAULT.undo_ms).unwrap_or(u32::MAX),
+                    });
                     self.report(Report::Learned {
                         peer,
                         name,
@@ -366,9 +557,19 @@ impl Host {
     // ---- node ----
 
     fn on_node(&mut self, event: NodeEvent) {
+        if !matches!(event, NodeEvent::Message { .. } | NodeEvent::Addresses(_)) {
+            self.dirty = true;
+        }
         match event {
             NodeEvent::PairingClosed(why) => {
                 info!(self.log, "pairing closed: {why:?}");
+                self.pairing = None;
+                self.broadcast(&UiEvent::PairingClosed(match why {
+                    ModeClosed::Paired => PairingClosedReason::Joined,
+                    ModeClosed::Expired => PairingClosedReason::Expired,
+                    ModeClosed::ByUser => PairingClosedReason::ByUser,
+                    ModeClosed::TooManyFailures => PairingClosedReason::TooManyFailures,
+                }));
                 self.report(Report::PairingClosed(why));
             }
             NodeEvent::Paired { peer, name } => {
@@ -378,6 +579,10 @@ impl Host {
                     name.as_str(),
                     self.short(peer)
                 );
+                self.broadcast(&UiEvent::Paired {
+                    key: peer.0,
+                    name: name.as_str().to_owned(),
+                });
                 self.report(Report::Paired {
                     peer,
                     name: name.as_str().to_owned(),
@@ -385,6 +590,14 @@ impl Host {
             }
             NodeEvent::JoinFailed(why) => {
                 warn!(self.log, "join failed: {why:?}");
+                self.broadcast(&UiEvent::JoinFailed(match why {
+                    JoinFailure::WrongCode => JoinFailedReason::WrongCode,
+                    JoinFailure::NotReady => JoinFailedReason::NotReady,
+                    JoinFailure::ProtocolError => JoinFailedReason::ProtocolError,
+                    JoinFailure::DeskFull => JoinFailedReason::DeskFull,
+                    JoinFailure::ConnectionLost => JoinFailedReason::ConnectionLost,
+                    JoinFailure::Unreachable => JoinFailedReason::Unreachable,
+                }));
                 self.report(Report::JoinFailed(why));
             }
             NodeEvent::PeerUp(peer) => {
@@ -421,18 +634,11 @@ impl Host {
     async fn on_command(&mut self, command: HostCommand) {
         match command {
             HostCommand::OpenPairing(reply) => {
-                let opened = self.node.open_pairing().await;
-                match &opened {
-                    Ok(_) => info!(self.log, "pairing opened"),
-                    Err(e) => warn!(self.log, "pairing not opened: {e}"),
-                }
+                let opened = self.open_pairing().await;
                 let _ = reply.send(opened);
             }
             HostCommand::ClosePairing => self.node.close_pairing(),
-            HostCommand::Join(code) => {
-                info!(self.log, "joining by code");
-                self.node.join(code);
-            }
+            HostCommand::Join(code) => self.join(code),
             HostCommand::Peers(reply) => {
                 let rows = self
                     .desk
@@ -445,14 +651,8 @@ impl Host {
                     .collect();
                 let _ = reply.send(rows);
             }
-            HostCommand::Remove(peer) => {
-                info!(self.log, "removing {}", self.name(peer));
-                self.node.remove(peer);
-            }
-            HostCommand::Undo => {
-                let at = self.clock.now();
-                self.engine(EngineEvent::Undo { at });
-            }
+            HostCommand::Remove(peer) => self.remove(peer),
+            HostCommand::Undo => self.undo(),
             HostCommand::ForgetLayout => self.engine(EngineEvent::ForgetLayout),
             HostCommand::Suspend(done) => {
                 info!(self.log, "going to sleep: saying goodbye");

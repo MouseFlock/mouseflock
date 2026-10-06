@@ -10,7 +10,7 @@
 //! |---|---|
 //! | [`active_console_session`], [`user_token`], [`Token::user_sid`], [`own_sid`] | which session and user get an agent |
 //! | [`launch_as`], [`Process`] | starting the agent as the session user |
-//! | [`create_agent_pipe`], [`client_process_id`] | the agent's pipe and who connected to it |
+//! | [`create_agent_pipe`], [`create_ui_pipe`], [`client_process_id`], [`client_session_id`] | the agent's and the UI's pipes, and who connected |
 //! | [`secure_folder`], [`create_admin_readable`] | the service's data folder, and its log |
 //! | [`sas_policy`], [`send_sas`] | the secure attention screen |
 //!
@@ -27,7 +27,10 @@ mod sid;
 mod token;
 
 pub use folder::{Prepared, create_admin_readable, secure_folder};
-pub use pipe::{agent_pipe_sddl, client_process_id, create_agent_pipe};
+pub use pipe::{
+    MAX_UI_INSTANCES, UiAdmit, agent_pipe_sddl, client_process_id, client_session_id,
+    create_agent_pipe, create_ui_pipe, own_session, ui_pipe_sddl,
+};
 pub use process::{Process, command_line, launch_as};
 pub use sas::{SAS_POLICY_KEY, SAS_POLICY_VALUE, allows_services, sas_policy, send_sas};
 pub use sid::{ADMINISTRATORS, GUESTS, SYSTEM, Sid, is_trusted_owner};

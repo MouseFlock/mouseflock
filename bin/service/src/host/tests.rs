@@ -37,6 +37,7 @@ struct Pc {
     running: Running,
     commands: mpsc::UnboundedSender<HostCommand>,
     links: mpsc::UnboundedSender<AgentLink>,
+    uis: mpsc::UnboundedSender<UiLink>,
     reports: mpsc::UnboundedReceiver<Report>,
     seen: Vec<Report>,
 }
@@ -60,6 +61,7 @@ fn pc(name: &str, dir: PathBuf) -> Pc {
     node.addresses = stored.addresses;
     let (reports_tx, reports) = mpsc::unbounded_channel();
     let (links, links_rx) = mpsc::unbounded_channel();
+    let (uis, uis_rx) = mpsc::unbounded_channel();
     let (commands, commands_rx) = mpsc::unbounded_channel();
     let clock = Clock::new();
     let config = HostConfig {
@@ -71,7 +73,7 @@ fn pc(name: &str, dir: PathBuf) -> Pc {
         clock,
         reports: Some(reports_tx),
     };
-    let running = start(config, links_rx, commands_rx).unwrap();
+    let running = start(config, links_rx, uis_rx, commands_rx).unwrap();
     Pc {
         id,
         dir,
@@ -80,6 +82,7 @@ fn pc(name: &str, dir: PathBuf) -> Pc {
         running,
         commands,
         links,
+        uis,
         reports,
         seen: Vec::new(),
     }
@@ -607,4 +610,346 @@ async fn console_prints_learned_side_with_undo_hint() {
         crate::console::describe(learned),
         "learned: B is to the right; type `undo` within 10 s to take it back"
     );
+}
+
+// ---- UIs (spec: ui-link) -------------------------------------------------------
+
+use ipc::link::{ServiceUiEnd, ServiceUiHandle, UiEnd};
+use ipc::message::{Hello, Role};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+/// A UI client over an in-memory pipe.
+struct Ui {
+    to_service: ServiceUiHandle,
+    events: mpsc::UnboundedReceiver<UiEvent>,
+    seen: Vec<UiEvent>,
+}
+
+impl Pc {
+    async fn ui(&self) -> Ui {
+        let (service_side, ui_side) = tokio::io::duplex(1 << 16);
+        let (service, ui) =
+            tokio::join!(ServiceUiEnd::accept(service_side), UiEnd::connect(ui_side));
+        let (handle, commands) = service.unwrap();
+        self.uis.send(UiLink { handle, commands }).unwrap();
+        let (to_service, events) = ui.unwrap();
+        Ui {
+            to_service,
+            events,
+            seen: Vec::new(),
+        }
+    }
+
+    /// A UI that says `Hello` and then does only what the test does with
+    /// the returned stream.
+    async fn raw_ui(&self, buffer: usize) -> tokio::io::DuplexStream {
+        let (service_side, mut ui_side) = tokio::io::duplex(buffer);
+        let mut hello = Vec::new();
+        Hello::this_release(Role::Ui)
+            .encode_frame(&mut hello)
+            .unwrap();
+        ui_side.write_all(&hello).await.unwrap();
+        let (handle, commands) = ServiceUiEnd::accept(service_side).await.unwrap();
+        self.uis.send(UiLink { handle, commands }).unwrap();
+        ui_side
+    }
+}
+
+impl Ui {
+    fn send(&self, command: UiCommand) {
+        self.to_service.send(command).unwrap();
+    }
+
+    async fn expect(&mut self, what: &str, want: impl Fn(&UiEvent) -> bool) -> UiEvent {
+        let deadline = Instant::now() + WAIT;
+        loop {
+            match tokio::time::timeout_at(deadline, self.events.recv()).await {
+                Ok(Some(e)) => {
+                    self.seen.push(e.clone());
+                    if want(&e) {
+                        return e;
+                    }
+                }
+                _ => panic!("no {what}; seen {:?}", self.seen),
+            }
+        }
+    }
+
+    async fn status(&mut self, what: &str, want: impl Fn(&Status) -> bool) -> Status {
+        match self
+            .expect(what, |e| matches!(e, UiEvent::Status(s) if want(s)))
+            .await
+        {
+            UiEvent::Status(s) => s,
+            _ => unreachable!(),
+        }
+    }
+}
+
+fn member_up(s: &Status, key: PeerId, up: bool) -> bool {
+    s.members.iter().any(|m| m.key == key.0 && m.up == up)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn status_on_connect() {
+    let a = pc("A", temp_dir("ui-a"));
+    let mut ui = a.ui().await;
+    let first = match timeout(WAIT, ui.events.recv()).await.unwrap().unwrap() {
+        UiEvent::Status(s) => s,
+        other => panic!("first event {other:?}"),
+    };
+    assert_eq!(first.key, a.id.0);
+    assert_eq!(first.name, "A");
+    assert!(!first.agent_linked);
+    assert_eq!(first.pairing, Pairing::Closed);
+    assert_eq!(first.focus, FocusOf::Local);
+    assert!(first.members.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn status_after_peer_down() {
+    let (a, mut b) = paired().await;
+    let mut ui = b.ui().await;
+    ui.status("A up", |s| member_up(s, a.id, true)).await;
+    a.running.node.shutdown();
+    let ida = a.id;
+    b.expect(
+        "A down",
+        |r| matches!(r, Report::PeerDown { peer, .. } if *peer == ida),
+    )
+    .await;
+    let reported = Instant::now();
+    ui.status("A down", |s| member_up(s, ida, false)).await;
+    assert!(
+        reported.elapsed() < Duration::from_millis(200),
+        "{:?}",
+        reported.elapsed()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn burst_is_coalesced() {
+    let a = pc("A", temp_dir("ui-burst"));
+    let mut ui = a.ui().await;
+    ui.status("first", |_| true).await;
+    // 50 changes spread over about 100 ms (pairing opens and closes), sent
+    // while this task reads, so arrival times are send times.
+    let Ui {
+        to_service,
+        mut events,
+        ..
+    } = ui;
+    let sender = tokio::spawn(async move {
+        for _ in 0..25 {
+            to_service.send(UiCommand::OpenPairing).unwrap();
+            to_service.send(UiCommand::ClosePairing).unwrap();
+            tokio::time::sleep(Duration::from_millis(4)).await;
+        }
+        to_service
+    });
+    // Collect every Status until the closed one after the last close settles.
+    let mut times = Vec::new();
+    let end = Instant::now() + Duration::from_secs(2);
+    while let Ok(Some(e)) = tokio::time::timeout_at(end, events.recv()).await {
+        if let UiEvent::Status(s) = e {
+            times.push((Instant::now(), s));
+        }
+    }
+    let _to_service = sender.await.unwrap();
+    assert!(
+        times.len() >= 2,
+        "only {} Status during the burst",
+        times.len()
+    );
+    let last = &times.last().expect("no Status after the burst").1;
+    assert_eq!(last.pairing, Pairing::Closed);
+    for pair in times.windows(2) {
+        let gap = pair[1].0 - pair[0].0;
+        // Sent at most every 100 ms; received with some scheduling delay.
+        // Without coalescing they arrive microseconds apart.
+        assert!(gap >= Duration::from_millis(50), "Status {gap:?} apart");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn open_pairing_shows_code() {
+    let a = pc("A", temp_dir("ui-open"));
+    let mut ui = a.ui().await;
+    ui.send(UiCommand::OpenPairing);
+    let s = ui
+        .status("open", |s| matches!(s.pairing, Pairing::Open { .. }))
+        .await;
+    let Pairing::Open { code, left_ms } = s.pairing else {
+        unreachable!()
+    };
+    assert!(Code::parse(&code).is_ok(), "{code}");
+    assert!((590_000..=600_000).contains(&left_ms), "{left_ms}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn join_from_ui() {
+    let mut a = pc("A", temp_dir("ui-join-a"));
+    let b = pc("B", temp_dir("ui-join-b"));
+    let mut ui_a = a.ui().await;
+    let mut ui_b = b.ui().await;
+    ui_a.send(UiCommand::OpenPairing);
+    let s = ui_a
+        .status("open", |s| matches!(s.pairing, Pairing::Open { .. }))
+        .await;
+    let Pairing::Open { code, .. } = s.pairing else {
+        unreachable!()
+    };
+    b.running.node.sighting(Sighting {
+        id: a.id,
+        addrs: vec![LOCAL],
+        port: a.running.node.local_addr().port(),
+        pairing: true,
+    });
+    ui_b.send(UiCommand::Join(code));
+    let ida = a.id;
+    ui_b.expect(
+        "paired with A",
+        |e| matches!(e, UiEvent::Paired { key, name } if *key == ida.0 && name == "A"),
+    )
+    .await;
+    ui_a.expect("paired with B", |e| matches!(e, UiEvent::Paired { .. }))
+        .await;
+    a.up(b.id).await;
+    ui_a.status("closed and B listed", |s| {
+        s.pairing == Pairing::Closed && s.members.iter().any(|m| m.name == "B")
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn mistyped_code_is_reported() {
+    let a = pc("A", temp_dir("ui-typo"));
+    let mut ui = a.ui().await;
+    // A real code with its last digit changed fails its check digit.
+    let (reply, code) = oneshot::channel();
+    a.send(HostCommand::OpenPairing(reply));
+    let code = code.await.unwrap().unwrap().to_string();
+    let (head, last) = code.split_at(code.len() - 1);
+    let digit = (last.parse::<u8>().unwrap() + 1) % 10;
+    ui.send(UiCommand::Join(format!("{head}{digit}")));
+    ui.expect("mistyped", |e| {
+        *e == UiEvent::JoinFailed(JoinFailedReason::MistypedCode)
+    })
+    .await;
+    ui.send(UiCommand::Join("hello".into()));
+    ui.expect("malformed", |e| {
+        *e == UiEvent::JoinFailed(JoinFailedReason::MalformedCode)
+    })
+    .await;
+    // No join was attempted, so no other failure follows.
+    assert!(
+        !ui.seen
+            .iter()
+            .any(|e| matches!(e, UiEvent::JoinFailed(r) if !matches!(r, JoinFailedReason::MistypedCode | JoinFailedReason::MalformedCode)))
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn remove_unknown_key_changes_nothing() {
+    let (mut a, b) = paired().await;
+    let mut ui = a.ui().await;
+    ui.status("B up", |s| member_up(s, b.id, true)).await;
+    ui.send(UiCommand::RemovePeer([0xee; 32]));
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    while let Ok(r) = a.reports.try_recv() {
+        assert!(!matches!(r, Report::PeerDown { .. }), "{r:?}");
+    }
+    // The link is still up: a change still reaches it.
+    let _agent = a.bare_agent().await;
+    ui.status("agent linked", |s| {
+        s.agent_linked && member_up(s, b.id, true)
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn learned_reaches_every_ui() {
+    let (a, b) = paired().await;
+    let mut uis = [a.ui().await, a.ui().await];
+    let mut agent_a = a.agent("A1").await;
+    let mut agent_b = b.agent("B1").await;
+    agent_a.next().await;
+    agent_b.next().await;
+    settle().await;
+    agent_a.push_right(5);
+    for ui in &mut uis {
+        ui.expect("learned", |e| {
+            *e == UiEvent::Learned {
+                key: b.id.0,
+                side: Side::Right,
+                undo_ms: 10_000,
+            }
+        })
+        .await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn stalled_ui_is_dropped() {
+    let (a, _b) = paired().await;
+    let mut agent = a.agent("A1").await;
+    agent.next().await;
+    let mut stalled = a.raw_ui(64).await;
+    let mut ui = a.ui().await;
+    ui.status("first", |_| true).await;
+    // 300 notices: more than the stalled UI's 256-message allowance.
+    for _ in 0..300 {
+        ui.send(UiCommand::Join("hello".into()));
+    }
+    for _ in 0..300 {
+        ui.expect("malformed", |e| matches!(e, UiEvent::JoinFailed(_)))
+            .await;
+    }
+    // The working UI still gets changes, and the agent link is untouched.
+    ui.send(UiCommand::OpenPairing);
+    ui.status("open", |s| matches!(s.pairing, Pairing::Open { .. }))
+        .await;
+    assert!(matches!(
+        agent.ended.try_recv(),
+        Err(oneshot::error::TryRecvError::Empty)
+    ));
+    // The stalled UI was cut off: reading what is left ends.
+    let mut buf = vec![0u8; 4096];
+    let ended = timeout(WAIT, async {
+        loop {
+            match stalled.read(&mut buf).await {
+                Ok(0) | Err(_) => return,
+                Ok(_) => {}
+            }
+        }
+    })
+    .await;
+    assert!(ended.is_ok(), "the stalled UI stayed connected");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn malformed_command_closes_only_that_ui() {
+    let a = pc("A", temp_dir("ui-bad"));
+    let mut raw = a.raw_ui(1 << 16).await;
+    let mut ui = a.ui().await;
+    ui.status("first", |_| true).await;
+    // A `Join` whose code length field says 33.
+    let mut frame = vec![34, 0, 0, 0, 0x32, 0x00, 33];
+    frame.extend(std::iter::repeat_n(b'1', 33));
+    raw.write_all(&frame).await.unwrap();
+    // The service closes that UI: its reads end after what was sent before.
+    let mut buf = vec![0u8; 1 << 16];
+    let closed = timeout(WAIT, async {
+        loop {
+            match raw.read(&mut buf).await {
+                Ok(0) | Err(_) => return,
+                Ok(_) => {}
+            }
+        }
+    })
+    .await;
+    assert!(closed.is_ok(), "the malformed UI stayed connected");
+    ui.send(UiCommand::OpenPairing);
+    ui.status("open", |s| matches!(s.pairing, Pairing::Open { .. }))
+        .await;
 }
