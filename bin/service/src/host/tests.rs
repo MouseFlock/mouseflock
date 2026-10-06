@@ -5,7 +5,8 @@
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
 
-use ipc::link::{AgentEnd, ServiceEnd, ServiceHandle};
+use ipc::clipboard::NotShared;
+use ipc::link::{AgentEnd, FromService, ServiceEnd, ServiceHandle};
 use ipc::message::ToService;
 use model::{InputAction, InputEvent, Key, Monitor, MonitorId, Origin, Point, Rect, Screen};
 use pairing::MachineName;
@@ -165,6 +166,7 @@ impl Pc {
             commands,
             ended: ended_rx,
             seen: Vec::new(),
+            set: Vec::new(),
         }
     }
 }
@@ -172,9 +174,11 @@ impl Pc {
 struct Agent {
     clock: Clock,
     reports: ServiceHandle,
-    commands: mpsc::UnboundedReceiver<ToAgent>,
+    commands: mpsc::UnboundedReceiver<FromService>,
     ended: oneshot::Receiver<()>,
     seen: Vec<ToAgent>,
+    /// Clipboard text the service told this agent to set, in order.
+    set: Vec<String>,
 }
 
 impl Agent {
@@ -214,27 +218,68 @@ impl Agent {
         }
     }
 
-    async fn next(&mut self) -> ToAgent {
-        match timeout(WAIT, self.commands.recv()).await {
-            Ok(Some(c)) => {
-                self.seen.push(c);
-                c
+    /// The next command before `deadline`, recording clipboard text set on
+    /// the way.
+    async fn command_by(&mut self, deadline: Instant) -> Option<ToAgent> {
+        loop {
+            match tokio::time::timeout_at(deadline, self.commands.recv()).await {
+                Ok(Some(FromService::Command(c))) => {
+                    self.seen.push(c);
+                    return Some(c);
+                }
+                Ok(Some(FromService::SetClipboard(text))) => self.set.push(text),
+                _ => return None,
             }
-            _ => panic!("no command; seen {:?}", self.seen),
+        }
+    }
+
+    async fn next(&mut self) -> ToAgent {
+        match self.command_by(Instant::now() + WAIT).await {
+            Some(c) => c,
+            None => panic!("no command; seen {:?}", self.seen),
+        }
+    }
+
+    /// Reports a copy of `text`, as the agent does after the user copies.
+    fn copy(&self, text: &str) {
+        self.reports.send_clipboard_text(text).unwrap();
+    }
+
+    /// The next text the service tells this agent to put on the clipboard.
+    async fn set_text(&mut self) -> String {
+        if !self.set.is_empty() {
+            return self.set.remove(0);
+        }
+        let deadline = Instant::now() + WAIT;
+        loop {
+            match tokio::time::timeout_at(deadline, self.commands.recv()).await {
+                Ok(Some(FromService::SetClipboard(text))) => return text,
+                Ok(Some(FromService::Command(c))) => self.seen.push(c),
+                _ => panic!("no clipboard set; seen {:?}", self.seen),
+            }
+        }
+    }
+
+    /// Fails if the service tells this agent to set anything within
+    /// `period`.
+    async fn no_set_for(&mut self, period: Duration) {
+        assert!(self.set.is_empty(), "set {:?}", self.set);
+        let deadline = Instant::now() + period;
+        while let Ok(Some(m)) = tokio::time::timeout_at(deadline, self.commands.recv()).await {
+            match m {
+                FromService::SetClipboard(text) => panic!("unexpected clipboard set {text:?}"),
+                FromService::Command(c) => self.seen.push(c),
+            }
         }
     }
 
     async fn expect(&mut self, what: &str, want: impl Fn(&ToAgent) -> bool) -> ToAgent {
         let deadline = Instant::now() + WAIT;
         loop {
-            match tokio::time::timeout_at(deadline, self.commands.recv()).await {
-                Ok(Some(c)) => {
-                    self.seen.push(c);
-                    if want(&c) {
-                        return c;
-                    }
-                }
-                _ => panic!("no {what}; seen {:?}", self.seen),
+            match self.command_by(deadline).await {
+                Some(c) if want(&c) => return c,
+                Some(_) => {}
+                None => panic!("no {what}; seen {:?}", self.seen),
             }
         }
     }
@@ -952,4 +997,126 @@ async fn malformed_command_closes_only_that_ui() {
     ui.send(UiCommand::OpenPairing);
     ui.status("open", |s| matches!(s.pairing, Pairing::Open { .. }))
         .await;
+}
+
+// ---- clipboard --------------------------------------------------------------
+
+/// A and B paired, each with an agent passing everything, focus local.
+async fn linked() -> (Pc, Pc, Agent, Agent) {
+    let (a, b) = paired().await;
+    let mut agent_a = a.agent("A1").await;
+    let mut agent_b = b.agent("B1").await;
+    for agent in [&mut agent_a, &mut agent_b] {
+        assert_eq!(
+            agent.next().await,
+            ToAgent::SetCapture(CaptureMode::PassAll)
+        );
+    }
+    settle().await;
+    (a, b, agent_a, agent_b)
+}
+
+/// Pushes A's cursor into B, learning B to A's right the first time.
+async fn cross_to_b(agent_a: &mut Agent, agent_b: &mut Agent) {
+    agent_a.push_right(5);
+    agent_a
+        .expect("withhold all", |c| {
+            *c == ToAgent::SetCapture(CaptureMode::WithholdAll)
+        })
+        .await;
+    agent_b
+        .expect("withhold mouse", |c| {
+            *c == ToAgent::SetCapture(CaptureMode::WithholdMouse)
+        })
+        .await;
+}
+
+/// B's own user presses a key, taking focus back; A is local again.
+async fn b_takes_back(a: &mut Pc, agent_b: &Agent) {
+    agent_b.key(Key(0x04), true);
+    a.expect("local", |r| {
+        matches!(
+            r,
+            Report::Focus {
+                focus: FocusView::Local,
+                ..
+            }
+        )
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn copy_then_cross_sets_text_on_b() {
+    let (_a, _b, mut agent_a, mut agent_b) = linked().await;
+    agent_a.copy("deskhop copy on A");
+    settle().await;
+    agent_b.no_set_for(Duration::from_millis(100)).await;
+    cross_to_b(&mut agent_a, &mut agent_b).await;
+    assert_eq!(agent_b.set_text().await, "deskhop copy on A");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn copy_on_b_then_focus_returns_to_a() {
+    let (mut a, _b, mut agent_a, mut agent_b) = linked().await;
+    cross_to_b(&mut agent_a, &mut agent_b).await;
+    agent_b.copy("deskhop copy on B");
+    settle().await;
+    b_takes_back(&mut a, &agent_b).await;
+    assert_eq!(agent_a.set_text().await, "deskhop copy on B");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn private_copy_is_not_offered() {
+    let (_a, _b, mut agent_a, mut agent_b) = linked().await;
+    agent_a.copy("deskhop shared");
+    agent_a
+        .reports
+        .send(ToService::ClipboardNotShared(NotShared::Private))
+        .unwrap();
+    settle().await;
+    cross_to_b(&mut agent_a, &mut agent_b).await;
+    // B asks for the shared copy it heard of; A no longer serves it.
+    agent_b.no_set_for(Duration::from_millis(500)).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn only_the_newest_copy_is_sent() {
+    let (_a, _b, mut agent_a, mut agent_b) = linked().await;
+    agent_a.copy("deskhop first");
+    agent_a.copy("deskhop second");
+    settle().await;
+    cross_to_b(&mut agent_a, &mut agent_b).await;
+    assert_eq!(agent_b.set_text().await, "deskhop second");
+    agent_b.no_set_for(Duration::from_millis(300)).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn no_echo_after_set() {
+    let (mut a, _b, mut agent_a, mut agent_b) = linked().await;
+    agent_a.copy("deskhop round trip");
+    settle().await;
+    cross_to_b(&mut agent_a, &mut agent_b).await;
+    assert_eq!(agent_b.set_text().await, "deskhop round trip");
+    // Back on A, nothing newer exists: A is told to set nothing.
+    b_takes_back(&mut a, &agent_b).await;
+    agent_a.no_set_for(Duration::from_millis(500)).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn log_has_no_clipboard_text() {
+    let (a, b, mut agent_a, mut agent_b) = linked().await;
+    let secret = "zq-deskhop-distinctive-7731";
+    agent_a.copy(secret);
+    settle().await;
+    cross_to_b(&mut agent_a, &mut agent_b).await;
+    assert_eq!(agent_b.set_text().await, secret);
+    let lines: Vec<String> = a.log.lines().into_iter().chain(b.log.lines()).collect();
+    assert!(
+        lines.iter().any(|l| l.contains("clipboard: set")),
+        "{lines:#?}"
+    );
+    for line in &lines {
+        assert!(!line.contains("zq-deskhop"), "{line}");
+    }
 }

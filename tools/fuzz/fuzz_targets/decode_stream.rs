@@ -7,6 +7,7 @@
 #![forbid(unsafe_code)]
 
 use libfuzzer_sys::fuzz_target;
+use proto::clipboard::{self, ClipboardMessage, TransferReader, TransferStep};
 use proto::frame::{self, Decoded, Frame, HEADER_LEN};
 use proto::hello::Hello;
 use proto::input::InputMessage;
@@ -28,6 +29,20 @@ fn decode_payload(m: Message<'_>) {
         assert_eq!(decoded.ty(), m.info.ty);
         assert_eq!(decoded.payload(), m.payload);
     }
+    if let Ok(decoded) = ClipboardMessage::decode(m.info.ty, m.payload) {
+        assert_eq!(decoded.ty(), m.info.ty);
+        assert_eq!(decoded.payload(), m.payload);
+    }
+}
+
+/// A clipboard-stream message through the reader: a chunk is exactly the
+/// frame's payload, and finishing at any point is total.
+fn read_transfer(reader: &mut TransferReader, m: Message<'_>) {
+    if let Ok(TransferStep::Chunk(c)) = reader.on_message(m.info.ty, m.payload) {
+        assert_eq!(c, m.payload);
+        let _ = clipboard::text(c);
+    }
+    let _ = reader.finish();
 }
 
 fuzz_target!(|data: &[u8]| {
@@ -41,6 +56,7 @@ fuzz_target!(|data: &[u8]| {
         assert!(session.on_control_frame(hello).is_ok());
     }
     let mut bit = 1;
+    let mut transfer = TransferReader::new();
     loop {
         match frame::decode(rest) {
             Ok(Decoded::NeedMore) | Err(_) => return,
@@ -55,7 +71,10 @@ fuzz_target!(|data: &[u8]| {
                     }
                 } else {
                     match session.on_stream_frame(frame) {
-                        Ok(StreamEvent::Message(m)) => Some(m),
+                        Ok(StreamEvent::Message(m)) => {
+                            read_transfer(&mut transfer, m);
+                            Some(m)
+                        }
                         Ok(StreamEvent::Wait) => None,
                         Err(_) => return,
                     }

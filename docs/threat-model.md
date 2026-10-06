@@ -1,13 +1,13 @@
 # DeskHop threat model
 
-*Status: covers the wire, pairing, desk membership, the LAN transport, forwarded input, the agent → service and UI → service pipes, the UI app, the service's data folder, console mode and secure attention. The secure desktop is filled in with its change.*
+*Status: covers the wire, pairing, desk membership, the LAN transport, forwarded input, the agent → service and UI → service pipes, the UI app, the clipboard, the service's data folder, console mode and secure attention. The secure desktop is filled in with its change.*
 
 DeskHop injects keystrokes received over the network, and its service runs as SYSTEM. This document records what it defends against and where.
 
 ## Assets
 
 - Identity keys and the trust store (service).
-- Keystrokes and clipboard contents in transit.
+- Keystrokes and clipboard contents in transit, and copied text held in the service's memory.
 - The ability to inject input into a machine, including the secure desktop.
 
 ## Trust boundaries
@@ -127,6 +127,23 @@ A UI can pair this machine with another, remove members, and change the learned 
 Residual risks:
 
 - **Pairing by anyone at the console.** On a shared or family PC, any user who can log on can pair a machine of their choosing. Removing it again is just as easy for the owner.
+
+### Clipboard
+
+Copied text can hold anything the user copies: messages, code, addresses, sometimes secrets. Specified in `openspec/specs/clipboard/spec.md`, and on the agent link in `openspec/specs/agent-link/spec.md`.
+
+- **It moves only where the cursor goes.** A copy sends members a random ID and no text. A member gets the text only by asking for that ID, and asks only when the cursor arrives there, so text never reaches a machine the user did not go to.
+- **Only the newest shareable copy is served.** A request for any other ID gets nothing. A newer private or non-text copy stops the earlier one from being served at all.
+- **Private copies stay on the machine.** The agent checks the markers password managers and similar apps set (`ExcludeClipboardContentFromMonitorProcessing`, or `CanIncludeInClipboardHistory` or `CanUploadToCloudClipboard` set to 0) before reading the text. A marked copy is reported as private, and its text is never read.
+- **On the LAN** text travels only on member connections (QUIC TLS pinned to identity keys), on a clipboard stream of its own, at most 4 MiB, with the order and length checked before any byte is kept. A clipboard stream on a pairing connection, or with a bad layout, closes the connection.
+- **In the service** text lives only in memory: this machine's newest shareable copy, and at most one incoming transfer per connection. It is never written to the log or to disk; the log records lengths only.
+- **A hostile agent or peer** is bounded by the 4 MiB limit, the run and stream rules, and the same no-panic decoding and fuzzing as the rest of `ipc` and `proto`. Transfers run on their own streams and tasks, so a slow one cannot delay input.
+
+Residual risks:
+
+- **Any member can ask for the newest shareable copy at any time,** not only when the cursor arrives. A member can already type into this machine and see what it types, so this adds no power. It is still limited to the newest shareable copy.
+- **Text lands in the console user's clipboard.** If a different Windows user is logged on at the target, that user receives it. Desk members are trusted machines; the user chose to pair them.
+- **The receiving PC treats received text as a local copy,** so its own clipboard history or cloud sync may keep it. Private copies are never sent, so nothing marked private is re-exposed this way.
 
 ### Identity key at rest
 

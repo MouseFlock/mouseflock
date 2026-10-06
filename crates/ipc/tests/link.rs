@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use ipc::frame::{self, Decoded};
-use ipc::link::{AgentEnd, FromAgent, LinkError, MAX_QUEUED, ServiceEnd};
+use ipc::link::{AgentEnd, FromAgent, FromService, LinkError, MAX_QUEUED, ServiceEnd};
 use ipc::message::{Hello, Role, ToAgent, ToService};
 use model::{CaptureMode, InputAction, InputEvent, Key, Millis, Origin, Point};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
@@ -182,7 +182,7 @@ async fn commands_arrive_in_order() {
         handle.send(cmd).unwrap();
     }
     for want in sent {
-        assert_eq!(commands.recv().await, Some(want));
+        assert_eq!(commands.recv().await, Some(FromService::Command(want)));
     }
 }
 

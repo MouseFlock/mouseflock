@@ -10,6 +10,7 @@
 
 #![forbid(unsafe_code)]
 
+mod clipboard;
 mod console;
 mod host;
 mod launch;

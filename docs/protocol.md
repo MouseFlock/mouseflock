@@ -63,6 +63,10 @@ Stream and datagram messages share one 16-bit namespace. A type not defined in t
 | `0x000E` | `WheelInput` | stream | 1 | See [Engine messages](#engine-messages). |
 | `0x000F` | `SecureAttention` | stream | 1 | Empty. |
 | `0x0010` | `Motion` | datagram | 1 | See [Motion](#motion). |
+| `0x0011` | `ClipboardOffer` | stream (control) | 1 | See [Clipboard](#clipboard). |
+| `0x0012` | `ClipboardRequest` | stream (control) | 1 | See [Clipboard](#clipboard). |
+| `0x0013` | `ClipboardData` | clipboard stream | 1 | See [Clipboard](#clipboard). |
+| `0x0014` | `ClipboardChunk` | clipboard stream | 1 | See [Clipboard](#clipboard). |
 
 ### Hello and version negotiation
 
@@ -101,7 +105,7 @@ Normative requirements: `openspec/specs/peer-transport/spec.md` and `openspec/sp
 
 Any other ALPN fails the handshake.
 
-**Control stream.** The dialer opens the connection's first bidirectional stream. Both sides write `Hello` on it at once ([Hello and version negotiation](#hello-and-version-negotiation)). Every stream message in this document travels on it; `Motion` travels in datagrams. A side finishes the stream only just before closing the connection.
+**Control stream.** The dialer opens the connection's first bidirectional stream. Both sides write `Hello` on it at once ([Hello and version negotiation](#hello-and-version-negotiation)). Every stream message in this document travels on it, except `ClipboardData` and `ClipboardChunk`, which travel on clipboard streams ([Clipboard](#clipboard)); `Motion` travels in datagrams. A side finishes the stream only just before closing the connection. It is the only bidirectional stream: each side allows its peer one.
 
 **Member connections.**
 
@@ -276,6 +280,25 @@ Motion payload, and the mark (12 bytes):
 - *The mark:* every `KeyInput`, `ButtonInput` and `WheelInput` starts with a mark covering all movement forwarded before it, including movement not yet sent in a datagram. That movement then gets no datagram of its own. The receiver applies the mark before acting on the message, so a click never overtakes the movement before it.
 - *Before up:* `Motion` datagrams that arrive before the peer is up are dropped, not treated as errors.
 
+### Clipboard
+
+Copied text follows the cursor: a copy is announced without its text, and a machine fetches it when the cursor crosses into it. Normative requirements: `openspec/specs/clipboard/spec.md`.
+
+| Message | Where | Payload | Bytes |
+|---|---|---|---|
+| `ClipboardOffer` | control stream | id: u64 | 8 |
+| `ClipboardRequest` | control stream | id: u64 | 8 |
+| `ClipboardData` | clipboard stream, first frame | id: u64, len: u32 | 12 |
+| `ClipboardChunk` | clipboard stream, after `ClipboardData` | 1 to 65,536 bytes of text | 1–65,536 |
+
+- *Where:* only on a member connection whose peer is up, as for [engine messages](#engine-messages). On a pairing connection, before the peer is up, or on the wrong kind of stream, any of them is a protocol error.
+- `ClipboardOffer`: the sender has a new shareable copy with this ID, chosen at random. It never carries text.
+- `ClipboardRequest`: the sender asks for the receiver's copy with this ID. The receiver answers with a clipboard stream if that is the copy it holds, and otherwise with nothing.
+- *Clipboard streams:* the sender of the text opens a unidirectional stream for one transfer. It writes one `ClipboardData`, then `ClipboardChunk` frames whose bytes total exactly `len`, then finishes the stream. Each side allows its peer one open clipboard stream at a time; QUIC flow control holds the next until the first ends.
+- *Limits:* `len` is at most 4,194,304 and is checked before any chunk is read. A chunk outside that order, an empty chunk, bytes beyond `len`, a stream that ends short, or text that is not UTF-8 is a protocol error.
+- *Text:* UTF-8, exactly as copied; line endings are not changed.
+- *Unrequested:* a well-formed clipboard stream for an ID the receiver did not request, or no longer wants, is read and discarded.
+
 ### Close reasons
 
 Sent as the QUIC application error code when closing a connection.
@@ -331,6 +354,9 @@ A type not defined in the agreed version, or travelling in a direction its type 
 | `0x0013` | `MotionEvent` | agent → service | 1 | at: u64, origin: u8, dx: i32, dy: i32, x: i32, y: i32 | 25 |
 | `0x0014` | `Screen` | agent → service | 1 | n: u8, then n monitors (below) | 1 + Σ(22 + id_len) |
 | `0x0015` | `Pong` | agent → service | 1 | service_time: u64, agent_time: u64 | 16 |
+| `0x0016` | `ClipboardText` | agent → service | 1 | len: u32 (≤ 4,194,304) | 4 |
+| `0x0017` | `ClipboardChunk` | agent → service | 1 | text bytes | 1–65,536 |
+| `0x0018` | `ClipboardNotShared` | agent → service | 1 | reason: u8 | 1 |
 | `0x0020` | `SetCapture` | service → agent | 1 | mode: u8 | 1 |
 | `0x0021` | `InjectKey` | service → agent | 1 | usage: u16, down: u8 | 3 |
 | `0x0022` | `InjectButton` | service → agent | 1 | button: u8, down: u8 | 2 |
@@ -338,6 +364,8 @@ A type not defined in the agreed version, or travelling in a direction its type 
 | `0x0024` | `InjectMotion` | service → agent | 1 | dx: i32, dy: i32 | 8 |
 | `0x0025` | `Warp` | service → agent | 1 | x: i32, y: i32 | 8 |
 | `0x0026` | `Ping` | service → agent | 1 | service_time: u64 | 8 |
+| `0x0027` | `SetClipboard` | service → agent | 1 | len: u32 (≤ 4,194,304) | 4 |
+| `0x0028` | `SetClipboardChunk` | service → agent | 1 | text bytes | 1–65,536 |
 | `0x0030` | `OpenPairing` | UI → service | 1 | — | 0 |
 | `0x0031` | `ClosePairing` | UI → service | 1 | — | 0 |
 | `0x0032` | `Join` | UI → service | 1 | code | 2–33 |
@@ -351,7 +379,9 @@ A type not defined in the agreed version, or travelling in a direction its type 
 | `0x003C` | `PairingNotOpened` | service → UI | 1 | reason: u8 | 1 |
 | `0x003D` | `Learned` | service → UI | 1 | key, side: u8, undo_ms: u32 | 37 |
 
-**Codes:** origin `0` physical, `1` injected. Down `0` released, `1` pressed. Button `0` left, `1` right, `2` middle, `3` X1, `4` X2. Mode `0` pass all, `1` withhold all, `2` withhold mouse. Any other value is a protocol error.
+**Codes:** origin `0` physical, `1` injected. Down `0` released, `1` pressed. Button `0` left, `1` right, `2` middle, `3` X1, `4` X2. Mode `0` pass all, `1` withhold all, `2` withhold mouse. Clipboard reason `0` private, `1` no text, `2` text too large. Any other value is a protocol error.
+
+**Clipboard runs:** text travels as a run. A `ClipboardText` or `SetClipboard` gives the length in bytes of UTF-8, and the chunks of the same direction that follow carry exactly that many bytes; a length of 0 is a complete run with no chunks. Other messages, input included, may come between chunks. A chunk outside a run, a chunk with no bytes, more bytes than announced, a new run or `ClipboardNotShared` before the run completes, or text that is not UTF-8 is a protocol error. The agent reports a copy once its clipboard has been still for 100 ms. It reports a copy marked to be kept out of clipboard monitoring, history or cloud sync as `ClipboardNotShared` with reason `0`, without reading its text, and never reports its own `SetClipboard` back. Normative requirements: `openspec/specs/agent-link/spec.md` and `openspec/specs/clipboard/spec.md`.
 
 **Fields:**
 - *usage:* a USB HID keyboard-page usage.
@@ -432,5 +462,5 @@ Any other value, a name or code outside its limits, or more than 256 members is 
 
 | Protocol | Version | Change |
 |---|---|---|
-| Peer | 1 | Stream frames, datagrams, message-type registry, `Hello` version negotiation, close reasons, pairing (`PairPake`, `PairConfirm`), desk membership (`MemberRecord`, `RecordsDone`), transport (port 47391, identity certificates, ALPNs, control stream, member connections, one connection per pair, liveness, mDNS), close reason `5`, engine messages (`0x0006`–`0x000F`) and `Motion` datagrams (`0x0010`). Version 1 has not shipped, so these are added without a version bump. |
-| IPC | 1 | Frames, `Hello` with roles and version negotiation, the message registry with directions, and the agent link (input and screen reports, `SetCapture`, injection, warp, `Ping`/`Pong` clock alignment). The UI link (`0x0030`–`0x003D`: pairing, join, remove, undo, forget layout, `Status` and notices), with directions per link. Version 1 has not shipped, so these fill it in without a version bump. |
+| Peer | 1 | Stream frames, datagrams, message-type registry, `Hello` version negotiation, close reasons, pairing (`PairPake`, `PairConfirm`), desk membership (`MemberRecord`, `RecordsDone`), transport (port 47391, identity certificates, ALPNs, control stream, member connections, one connection per pair, liveness, mDNS), close reason `5`, engine messages (`0x0006`–`0x000F`), `Motion` datagrams (`0x0010`), and the clipboard (`0x0011`–`0x0014`, clipboard streams). Version 1 has not shipped, so these are added without a version bump. |
+| IPC | 1 | Frames, `Hello` with roles and version negotiation, the message registry with directions, and the agent link (input and screen reports, `SetCapture`, injection, warp, `Ping`/`Pong` clock alignment), and clipboard runs (`0x0016`–`0x0018`, `0x0027`–`0x0028`). The UI link (`0x0030`–`0x003D`: pairing, join, remove, undo, forget layout, `Status` and notices), with directions per link. Version 1 has not shipped, so these fill it in without a version bump. |

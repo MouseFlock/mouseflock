@@ -12,6 +12,7 @@ use std::process::{Child, Command, ExitStatus};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
+use ipc::clipboard::Copied;
 use ipc::link::{AgentHandle, FromAgent, ServiceEnd};
 use ipc::message::ToAgent;
 use model::{CaptureMode, InputAction, InputEvent, Key, Millis, Origin};
@@ -157,4 +158,48 @@ async fn service_gone_releases_capture() {
     drop(events);
     let status = exits_within(&mut child, Duration::from_secs(1)).expect("agent kept running");
     assert_eq!(status.code(), Some(0));
+}
+
+/// Runs a PowerShell clipboard cmdlet, as another app on the desktop would.
+fn powershell(script: &str) -> String {
+    let out = Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", script])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{script}: {out:?}");
+    String::from_utf8_lossy(&out.stdout).trim_end().to_owned()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs a desktop; replaces the clipboard"]
+async fn clipboard_copy_is_reported_and_set_is_not() {
+    let (mut child, handle, mut events) = linked_agent().await;
+    next_matching(&mut events, |e| matches!(e, FromAgent::Screen(_))).await;
+
+    // Set-Clipboard goes through the OLE clipboard, which can change the
+    // clipboard twice; a slow second change is a second report, and the
+    // newest one is the copy.
+    powershell("Set-Clipboard -Value 'deskhop hello'");
+    let want = FromAgent::Clipboard(Copied::Text("deskhop hello".into()));
+    next_matching(&mut events, |e| *e == want).await;
+
+    handle.set_clipboard("deskhop world").unwrap();
+    let end = Instant::now() + WAIT;
+    while powershell("Get-Clipboard -Raw") != "deskhop world" {
+        assert!(Instant::now() < end, "the agent never set the clipboard");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    // Its own write is not reported back.
+    let echo = tokio::time::timeout(Duration::from_millis(600), async {
+        loop {
+            if let Some(FromAgent::Clipboard(c)) = events.recv().await {
+                return c;
+            }
+        }
+    })
+    .await;
+    assert!(echo.is_err(), "the agent reported its own write: {echo:?}");
+
+    drop(handle);
+    assert!(exits_within(&mut child, WAIT).is_some());
 }
