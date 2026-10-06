@@ -9,7 +9,7 @@ use model::{
     Rect, Screen,
 };
 
-use crate::{EncodeError, IPC_VERSION, MIN_IPC_VERSION, ProtocolError, frame};
+use crate::{EncodeError, IPC_VERSION, MIN_IPC_VERSION, ProtocolError, frame, ui};
 
 /// Never a valid message type.
 pub const RESERVED: u16 = 0x0000;
@@ -42,10 +42,14 @@ pub const DPI_RANGE: std::ops::RangeInclusive<u32> = 48..=960;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Direction {
     /// From an agent to the service.
-    ToService,
+    AgentToService,
     /// From the service to an agent.
-    ToAgent,
-    /// Either way (`Hello`).
+    ServiceToAgent,
+    /// From a UI to the service.
+    UiToService,
+    /// From the service to a UI.
+    ServiceToUi,
+    /// Either way, on every link (`Hello`).
     Both,
 }
 
@@ -71,19 +75,35 @@ const fn info(ty: u16, name: &'static str, direction: Direction) -> TypeInfo {
 /// Every message type, in type order.
 pub const REGISTRY: &[TypeInfo] = &[
     info(HELLO, "Hello", Direction::Both),
-    info(KEY_EVENT, "KeyEvent", Direction::ToService),
-    info(BUTTON_EVENT, "ButtonEvent", Direction::ToService),
-    info(WHEEL_EVENT, "WheelEvent", Direction::ToService),
-    info(MOTION_EVENT, "MotionEvent", Direction::ToService),
-    info(SCREEN, "Screen", Direction::ToService),
-    info(PONG, "Pong", Direction::ToService),
-    info(SET_CAPTURE, "SetCapture", Direction::ToAgent),
-    info(INJECT_KEY, "InjectKey", Direction::ToAgent),
-    info(INJECT_BUTTON, "InjectButton", Direction::ToAgent),
-    info(INJECT_WHEEL, "InjectWheel", Direction::ToAgent),
-    info(INJECT_MOTION, "InjectMotion", Direction::ToAgent),
-    info(WARP, "Warp", Direction::ToAgent),
-    info(PING, "Ping", Direction::ToAgent),
+    info(KEY_EVENT, "KeyEvent", Direction::AgentToService),
+    info(BUTTON_EVENT, "ButtonEvent", Direction::AgentToService),
+    info(WHEEL_EVENT, "WheelEvent", Direction::AgentToService),
+    info(MOTION_EVENT, "MotionEvent", Direction::AgentToService),
+    info(SCREEN, "Screen", Direction::AgentToService),
+    info(PONG, "Pong", Direction::AgentToService),
+    info(SET_CAPTURE, "SetCapture", Direction::ServiceToAgent),
+    info(INJECT_KEY, "InjectKey", Direction::ServiceToAgent),
+    info(INJECT_BUTTON, "InjectButton", Direction::ServiceToAgent),
+    info(INJECT_WHEEL, "InjectWheel", Direction::ServiceToAgent),
+    info(INJECT_MOTION, "InjectMotion", Direction::ServiceToAgent),
+    info(WARP, "Warp", Direction::ServiceToAgent),
+    info(PING, "Ping", Direction::ServiceToAgent),
+    info(ui::OPEN_PAIRING, "OpenPairing", Direction::UiToService),
+    info(ui::CLOSE_PAIRING, "ClosePairing", Direction::UiToService),
+    info(ui::JOIN, "Join", Direction::UiToService),
+    info(ui::REMOVE_PEER, "RemovePeer", Direction::UiToService),
+    info(ui::UNDO, "Undo", Direction::UiToService),
+    info(ui::FORGET_LAYOUT, "ForgetLayout", Direction::UiToService),
+    info(ui::STATUS, "Status", Direction::ServiceToUi),
+    info(ui::PAIRED, "Paired", Direction::ServiceToUi),
+    info(ui::JOIN_FAILED, "JoinFailed", Direction::ServiceToUi),
+    info(ui::PAIRING_CLOSED, "PairingClosed", Direction::ServiceToUi),
+    info(
+        ui::PAIRING_NOT_OPENED,
+        "PairingNotOpened",
+        Direction::ServiceToUi,
+    ),
+    info(ui::LEARNED, "Learned", Direction::ServiceToUi),
 ];
 
 /// Checks that `ty` is defined in `version` and may arrive at an end that
@@ -266,19 +286,23 @@ const fn mode_from(ty: u16, value: u8) -> Result<CaptureMode, ProtocolError> {
 // ---- field reading ----------------------------------------------------------
 
 /// Reads fields front to back; every shortfall is a payload-length error.
-struct Fields<'a> {
+pub(crate) struct Fields<'a> {
     ty: u16,
     rest: &'a [u8],
     len: usize,
 }
 
 impl<'a> Fields<'a> {
-    const fn new(ty: u16, payload: &'a [u8]) -> Self {
+    pub(crate) const fn new(ty: u16, payload: &'a [u8]) -> Self {
         Self {
             ty,
             rest: payload,
             len: payload.len(),
         }
+    }
+
+    pub(crate) const fn ty(&self) -> u16 {
+        self.ty
     }
 
     fn short(&self) -> ProtocolError {
@@ -289,27 +313,27 @@ impl<'a> Fields<'a> {
         }
     }
 
-    fn array<const N: usize>(&mut self) -> Result<[u8; N], ProtocolError> {
+    pub(crate) fn array<const N: usize>(&mut self) -> Result<[u8; N], ProtocolError> {
         let (head, rest) = self.rest.split_first_chunk::<N>().ok_or(self.short())?;
         self.rest = rest;
         Ok(*head)
     }
 
-    fn bytes(&mut self, n: usize) -> Result<&'a [u8], ProtocolError> {
+    pub(crate) fn bytes(&mut self, n: usize) -> Result<&'a [u8], ProtocolError> {
         let (head, rest) = self.rest.split_at_checked(n).ok_or(self.short())?;
         self.rest = rest;
         Ok(head)
     }
 
-    fn u8(&mut self) -> Result<u8, ProtocolError> {
+    pub(crate) fn u8(&mut self) -> Result<u8, ProtocolError> {
         self.array::<1>().map(|[b]| b)
     }
 
-    fn u16(&mut self) -> Result<u16, ProtocolError> {
+    pub(crate) fn u16(&mut self) -> Result<u16, ProtocolError> {
         self.array().map(u16::from_le_bytes)
     }
 
-    fn u32(&mut self) -> Result<u32, ProtocolError> {
+    pub(crate) fn u32(&mut self) -> Result<u32, ProtocolError> {
         self.array().map(u32::from_le_bytes)
     }
 
@@ -322,7 +346,7 @@ impl<'a> Fields<'a> {
     }
 
     /// Fails unless every byte was read.
-    fn end(&self) -> Result<(), ProtocolError> {
+    pub(crate) fn end(&self) -> Result<(), ProtocolError> {
         if self.rest.is_empty() {
             Ok(())
         } else {
@@ -336,7 +360,7 @@ impl<'a> Fields<'a> {
 }
 
 /// Checks that `payload` is exactly `n` bytes.
-const fn exactly(ty: u16, payload: &[u8], n: usize) -> Result<(), ProtocolError> {
+pub(crate) const fn exactly(ty: u16, payload: &[u8], n: usize) -> Result<(), ProtocolError> {
     if payload.len() == n {
         Ok(())
     } else {
@@ -454,7 +478,7 @@ impl ToService {
 
     /// Decodes a message the service received, after `Hello`.
     pub fn decode(ty: u16, payload: &[u8], version: u16) -> Result<Self, ProtocolError> {
-        check(ty, Direction::ToService, version)?;
+        check(ty, Direction::AgentToService, version)?;
         let mut f = Fields::new(ty, payload);
         let input = |f: &mut Fields<'_>, n: usize| -> Result<(Millis, Origin), ProtocolError> {
             exactly(ty, payload, n)?;
@@ -602,7 +626,7 @@ impl ToAgent {
 
     /// Decodes a message an agent received, after `Hello`.
     pub fn decode(ty: u16, payload: &[u8], version: u16) -> Result<Self, ProtocolError> {
-        check(ty, Direction::ToAgent, version)?;
+        check(ty, Direction::ServiceToAgent, version)?;
         let mut f = Fields::new(ty, payload);
         let message = match ty {
             HELLO => return Err(ProtocolError::DuplicateHello),

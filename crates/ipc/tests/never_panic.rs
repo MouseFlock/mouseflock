@@ -4,6 +4,7 @@
 
 use ipc::frame::{self, Decoded, HEADER_LEN};
 use ipc::message::{Hello, Role, ToAgent, ToService};
+use ipc::ui::{FocusOf, Member, Pairing, Status, UiCommand, UiEvent};
 use model::{
     Button, CaptureMode, InputAction, InputEvent, Key, Millis, Monitor, MonitorId, Origin, Point,
     Rect, Screen,
@@ -47,6 +48,12 @@ fn drive(input: &[u8]) {
                 if let Ok(m) = ToAgent::decode(frame.ty, frame.payload, 1) {
                     assert_eq!(m.payload(), frame.payload);
                 }
+                if let Ok(m) = UiCommand::decode(frame.ty, frame.payload, 1) {
+                    assert_eq!(m.payload().unwrap(), frame.payload);
+                }
+                if let Ok(m) = UiEvent::decode(frame.ty, frame.payload, 1) {
+                    assert_eq!(m.payload().unwrap(), frame.payload);
+                }
                 rest = &rest[consumed..];
             }
         }
@@ -88,7 +95,15 @@ fn valid_frames(rng: &mut Rng) -> Vec<u8> {
         .encode_frame(&mut out)
         .unwrap();
     for _ in 0..rng.below(4) {
-        match rng.below(5) {
+        match rng.below(8) {
+            5 => ui_command(rng).encode_frame(&mut out).unwrap(),
+            6 => UiEvent::Status(status(rng)).encode_frame(&mut out).unwrap(),
+            7 => UiEvent::Paired {
+                key: [rng.next() as u8; 32],
+                name: "B".repeat(1 + rng.below(63)),
+            }
+            .encode_frame(&mut out)
+            .unwrap(),
             0 => ToService::Input {
                 at: Millis(rng.next()),
                 input: event(rng),
@@ -137,6 +152,42 @@ fn valid_frames(rng: &mut Rng) -> Vec<u8> {
         }
     }
     out
+}
+
+fn ui_command(rng: &mut Rng) -> UiCommand {
+    match rng.below(6) {
+        0 => UiCommand::OpenPairing,
+        1 => UiCommand::ClosePairing,
+        2 => UiCommand::Join("12-3456789".into()),
+        3 => UiCommand::RemovePeer([rng.next() as u8; 32]),
+        4 => UiCommand::Undo,
+        _ => UiCommand::ForgetLayout,
+    }
+}
+
+fn status(rng: &mut Rng) -> Status {
+    let key = [rng.next() as u8; 32];
+    Status {
+        key,
+        name: "A".into(),
+        agent_linked: rng.below(2) == 0,
+        pairing: if rng.below(2) == 0 {
+            Pairing::Closed
+        } else {
+            Pairing::Open {
+                code: "12-3456789".into(),
+                left_ms: rng.next() as u32,
+            }
+        },
+        focus: [FocusOf::Local, FocusOf::On(key), FocusOf::ControlledBy(key)][rng.below(3)],
+        members: (0..rng.below(4))
+            .map(|i| Member {
+                key: [i as u8; 32],
+                name: format!("M{i}"),
+                up: rng.below(2) == 0,
+            })
+            .collect(),
+    }
 }
 
 fn mutate(input: &mut Vec<u8>, rng: &mut Rng) {

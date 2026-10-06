@@ -31,6 +31,9 @@ pub enum ProtocolError {
     /// A screen report that breaks a limit: too many monitors, a bad
     /// identity, an empty or overflowing rectangle, or an implausible DPI.
     InvalidScreen,
+    /// A name, code or count outside its limits, or text that is not
+    /// UTF-8 or printable ASCII as its layout requires.
+    InvalidField { ty: u16 },
 }
 
 impl fmt::Display for ProtocolError {
@@ -61,6 +64,9 @@ impl fmt::Display for ProtocolError {
                 write!(f, "invalid version range {min}..={max}")
             }
             Self::InvalidScreen => write!(f, "screen report breaks a limit"),
+            Self::InvalidField { ty } => {
+                write!(f, "message type {ty:#06x} has a field outside its limits")
+            }
         }
     }
 }
@@ -75,6 +81,8 @@ pub enum EncodeError {
     PayloadTooLarge { len: usize },
     /// A screen outside the limits a receiver enforces.
     InvalidScreen,
+    /// A name, code or member list outside the limits a receiver enforces.
+    InvalidField,
 }
 
 impl fmt::Display for EncodeError {
@@ -82,6 +90,9 @@ impl fmt::Display for EncodeError {
         match self {
             Self::PayloadTooLarge { len } => write!(f, "payload of {len} bytes over limit"),
             Self::InvalidScreen => write!(f, "screen outside the protocol's limits"),
+            Self::InvalidField => {
+                write!(f, "name, code or member list outside the protocol's limits")
+            }
         }
     }
 }

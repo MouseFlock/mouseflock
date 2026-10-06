@@ -1,6 +1,6 @@
 # DeskHop threat model
 
-*Status: covers the wire, pairing, desk membership, the LAN transport, forwarded input, the agent → service pipe, the service's data folder, console mode and secure attention. The UI pipe and the secure desktop are filled in with their changes.*
+*Status: covers the wire, pairing, desk membership, the LAN transport, forwarded input, the agent → service and UI → service pipes, the service's data folder, console mode and secure attention. The secure desktop is filled in with its change.*
 
 DeskHop injects keystrokes received over the network, and its service runs as SYSTEM. This document records what it defends against and where.
 
@@ -15,7 +15,7 @@ DeskHop injects keystrokes received over the network, and its service runs as SY
 | Boundary | Less trusted side | Notes |
 |---|---|---|
 | LAN → service | Any host on the network | Unauthenticated packets reach `proto` decoding as SYSTEM. |
-| Named pipe → service | Agents, UI | The service validates everything it receives (ADR 0002). Agent link: see "Agent → service". |
+| Named pipe → service | Agents, UI | The service validates everything it receives (ADR 0002). See "Agent → service" and "UI → service". |
 | Service → winlogon agent | — | Agent runs as SYSTEM on the secure desktop. |
 
 ## Threats
@@ -97,6 +97,32 @@ The session agent runs as the logged-in user and reports every key and mouse eve
 - **The agent runs as the user, not as SYSTEM.** The service launches it with the session user's own token (`WTSQueryUserToken`, `CreateProcessAsUserW`), so it has the user's rights and no more. Every launch goes through one function in `bin/service`, and the Win32 calls live in `win32-session` (ADR 0006).
 
 Residual risk: another process running as the same user can open the pipe if it wins the race to connect. It is then closed unread, and that launch counts as failed. Such a process could keep the agent from linking, a denial of service, but it cannot inject or report input. A process running as the user can already synthesize input on that user's desktop, so the pipe adds no power.
+
+### UI → service (named pipe)
+
+A UI can pair this machine with another, remove members, and change the learned layout. Pairing adds a machine that can then type into this one, so who can reach the UI pipe matters. Specified in `openspec/specs/ui-link/spec.md`.
+
+- **Who can connect.**
+  - The pipe `\\.\pipe\deskhop-ui` refuses remote clients.
+  - Its protected ACL admits SYSTEM and interactive users (`IU`).
+  - The service then accepts a client only if the connecting process runs in the active console session, before reading a byte from it. A UI in an RDP session, or in a session switched away from the console, is closed.
+  - In console mode the pipe admits only the user running console mode.
+- **What a UI can do.** Any user at the console may open pairing, join, remove a member, undo a learned side and forget the layout. This was chosen for zero configuration: pairing still needs physical access to both screens and a one-time code with 3 guesses, so a user at this console can already decide what this machine is joined to. Managed configuration can narrow it later.
+- **What a UI sees.** The pairing code while pairing is open, member names and keys, and where focus is. Everyone at the console can see the screen anyway.
+- **A slow or hostile UI cannot block the service.**
+  - At most 8 UIs connect at once, enforced by the pipe's instance limit.
+  - Every message has a fixed or bounded layout (names up to 63 bytes, codes up to 32, at most 256 members), under the same no-panic decoding and fuzzing as the rest of `ipc`. A UI that breaks it is closed alone.
+  - Sending to a UI never waits, and a UI with more than 256 unsent messages is disconnected.
+  - Commands are cheap, and pairing attempts are limited by pairing mode itself.
+- **Pipe squatting.** A process that created `\\.\pipe\deskhop-ui` before the service could pose as the service to UIs: show a wrong code, or collect a typed one.
+  - The service starts at boot and creates the name as the first instance before anyone logs on. It keeps one instance listening at all times, so the name never falls free while it runs.
+  - If the name is taken at start, the service logs it and retries every 5 seconds.
+  - Open item, closed by `add-onboarding`: the UI must check that the pipe's server runs in session 0 (`GetNamedPipeServerSessionId`), where only services run, before trusting anything it reads. A squatter running as a user cannot run in session 0.
+
+Residual risks:
+
+- **Pairing by anyone at the console.** On a shared or family PC, any user who can log on can pair a machine of their choosing. Removing it again is just as easy for the owner.
+- **A squatter before the service starts.** Until `add-onboarding` adds the UI's session-0 check, a user process started before the service (only possible if the service is stopped or not yet started) could answer UIs.
 
 ### Identity key at rest
 
