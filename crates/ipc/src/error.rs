@@ -34,6 +34,9 @@ pub enum ProtocolError {
     /// A name, code or count outside its limits, or text that is not
     /// UTF-8 or printable ASCII as its layout requires.
     InvalidField { ty: u16 },
+    /// A clipboard message that breaks a run: a chunk outside a run, too
+    /// many bytes for it, or another clipboard message cutting it short.
+    ClipboardRun { ty: u16 },
 }
 
 impl fmt::Display for ProtocolError {
@@ -66,6 +69,9 @@ impl fmt::Display for ProtocolError {
             Self::InvalidScreen => write!(f, "screen report breaks a limit"),
             Self::InvalidField { ty } => {
                 write!(f, "message type {ty:#06x} has a field outside its limits")
+            }
+            Self::ClipboardRun { ty } => {
+                write!(f, "message type {ty:#06x} breaks a clipboard run")
             }
         }
     }

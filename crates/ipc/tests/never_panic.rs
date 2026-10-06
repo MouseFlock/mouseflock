@@ -2,8 +2,9 @@
 //! message re-encodes to the same bytes. Deterministic, so it runs in
 //! `cargo test`; `tools/fuzz` covers the same driver with coverage guidance.
 
+use ipc::clipboard::{NotShared, RunAssembler};
 use ipc::frame::{self, Decoded, HEADER_LEN};
-use ipc::message::{Hello, Role, ToAgent, ToService};
+use ipc::message::{ClipboardToAgent, Hello, Role, ToAgent, ToAgentAny, ToService};
 use ipc::ui::{FocusOf, Member, Pairing, Status, UiCommand, UiEvent};
 use model::{
     Button, CaptureMode, InputAction, InputEvent, Key, Millis, Monitor, MonitorId, Origin, Point,
@@ -32,10 +33,29 @@ impl Rng {
     }
 }
 
+/// Feeds a decoded clipboard message to the run at the end that receives it;
+/// errors are fine, panics are not.
+fn run_service(runs: &mut RunAssembler, m: &ToService) {
+    let _ = match m {
+        ToService::ClipboardText(len) => runs.start(0x16, *len).map(|_| ()),
+        ToService::ClipboardChunk(bytes) => runs.chunk(0x17, bytes).map(|_| ()),
+        ToService::ClipboardNotShared(_) => runs.not_in_run(0x18),
+        _ => Ok(()),
+    };
+}
+
+fn run_agent(runs: &mut RunAssembler, m: &ClipboardToAgent) {
+    let _ = match m {
+        ClipboardToAgent::Set(len) => runs.start(0x27, *len),
+        ClipboardToAgent::Chunk(bytes) => runs.chunk(0x28, bytes),
+    };
+}
+
 /// Decodes every frame in `input` as both ends would; decoded messages
 /// re-encode to the same payload.
 fn drive(input: &[u8]) {
     let mut rest = input;
+    let (mut service_runs, mut agent_runs) = (RunAssembler::default(), RunAssembler::default());
     loop {
         match frame::decode(rest) {
             Ok(Decoded::NeedMore) | Err(_) => return,
@@ -44,9 +64,15 @@ fn drive(input: &[u8]) {
                 let _ = Hello::decode(frame.payload);
                 if let Ok(m) = ToService::decode(frame.ty, frame.payload, 1) {
                     assert_eq!(m.payload().unwrap(), frame.payload);
+                    run_service(&mut service_runs, &m);
                 }
                 if let Ok(m) = ToAgent::decode(frame.ty, frame.payload, 1) {
                     assert_eq!(m.payload(), frame.payload);
+                }
+                if let Ok(ToAgentAny::Clipboard(m)) = ToAgentAny::decode(frame.ty, frame.payload, 1)
+                {
+                    assert_eq!(m.payload().unwrap(), frame.payload);
+                    run_agent(&mut agent_runs, &m);
                 }
                 if let Ok(m) = UiCommand::decode(frame.ty, frame.payload, 1) {
                     assert_eq!(m.payload().unwrap(), frame.payload);
@@ -95,7 +121,36 @@ fn valid_frames(rng: &mut Rng) -> Vec<u8> {
         .encode_frame(&mut out)
         .unwrap();
     for _ in 0..rng.below(4) {
-        match rng.below(8) {
+        match rng.below(11) {
+            8 => {
+                let len = rng.below(20);
+                let text = rng.bytes(len);
+                ToService::ClipboardText(text.len() as u32)
+                    .encode_frame(&mut out)
+                    .unwrap();
+                for c in text.chunks(1 + rng.below(6)) {
+                    ToService::ClipboardChunk(c.to_vec())
+                        .encode_frame(&mut out)
+                        .unwrap();
+                }
+            }
+            9 => {
+                let len = rng.below(20);
+                let text = rng.bytes(len);
+                ClipboardToAgent::Set(text.len() as u32)
+                    .encode_frame(&mut out)
+                    .unwrap();
+                for c in text.chunks(1 + rng.below(6)) {
+                    ClipboardToAgent::Chunk(c.to_vec())
+                        .encode_frame(&mut out)
+                        .unwrap();
+                }
+            }
+            10 => ToService::ClipboardNotShared(
+                [NotShared::Private, NotShared::NoText, NotShared::TooLarge][rng.below(3)],
+            )
+            .encode_frame(&mut out)
+            .unwrap(),
             5 => ui_command(rng).encode_frame(&mut out).unwrap(),
             6 => UiEvent::Status(status(rng)).encode_frame(&mut out).unwrap(),
             7 => UiEvent::Paired {

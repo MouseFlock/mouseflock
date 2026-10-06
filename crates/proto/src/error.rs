@@ -44,6 +44,19 @@ pub enum ProtocolError {
     InvalidCode { ty: u16, value: u8 },
     /// Input after the session already failed.
     SessionFailed,
+    /// A clipboard transfer longer than the text limit.
+    TextTooLong { len: u32 },
+    /// A clipboard-stream message out of order: a chunk before `ClipboardData`,
+    /// or a second `ClipboardData`.
+    TransferOrder { ty: u16 },
+    /// A `ClipboardChunk` with no bytes.
+    EmptyChunk,
+    /// Clipboard chunks beyond the length `ClipboardData` announced.
+    TextOverrun,
+    /// A clipboard stream that ended before its announced length.
+    TextIncomplete { remaining: u32 },
+    /// Clipboard text that is not UTF-8.
+    TextNotUtf8,
 }
 
 impl fmt::Display for ProtocolError {
@@ -81,6 +94,19 @@ impl fmt::Display for ProtocolError {
                 write!(f, "message type {ty:#06x} has undefined code {value}")
             }
             Self::SessionFailed => write!(f, "session already failed"),
+            Self::TextTooLong { len } => write!(f, "clipboard text of {len} bytes over limit"),
+            Self::TransferOrder { ty } => {
+                write!(
+                    f,
+                    "message type {ty:#06x} out of order on a clipboard stream"
+                )
+            }
+            Self::EmptyChunk => write!(f, "empty clipboard chunk"),
+            Self::TextOverrun => write!(f, "clipboard chunks beyond the announced length"),
+            Self::TextIncomplete { remaining } => {
+                write!(f, "clipboard stream ended {remaining} bytes short")
+            }
+            Self::TextNotUtf8 => write!(f, "clipboard text is not UTF-8"),
         }
     }
 }

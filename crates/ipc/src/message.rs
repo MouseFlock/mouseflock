@@ -9,6 +9,7 @@ use model::{
     Rect, Screen,
 };
 
+use crate::clipboard::{MAX_TEXT_LEN, NotShared};
 use crate::{EncodeError, IPC_VERSION, MIN_IPC_VERSION, ProtocolError, frame, ui};
 
 /// Never a valid message type.
@@ -22,6 +23,12 @@ pub const WHEEL_EVENT: u16 = 0x0012;
 pub const MOTION_EVENT: u16 = 0x0013;
 pub const SCREEN: u16 = 0x0014;
 pub const PONG: u16 = 0x0015;
+/// Starts a run of copied text: its length in bytes of UTF-8.
+pub const CLIPBOARD_TEXT: u16 = 0x0016;
+/// Copied text bytes, within a `ClipboardText` run.
+pub const CLIPBOARD_CHUNK: u16 = 0x0017;
+/// The newest copy is not shared, and why.
+pub const CLIPBOARD_NOT_SHARED: u16 = 0x0018;
 
 pub const SET_CAPTURE: u16 = 0x0020;
 pub const INJECT_KEY: u16 = 0x0021;
@@ -30,6 +37,10 @@ pub const INJECT_WHEEL: u16 = 0x0023;
 pub const INJECT_MOTION: u16 = 0x0024;
 pub const WARP: u16 = 0x0025;
 pub const PING: u16 = 0x0026;
+/// Starts a run of text for the agent to put on the clipboard.
+pub const SET_CLIPBOARD: u16 = 0x0027;
+/// Text bytes, within a `SetClipboard` run.
+pub const SET_CLIPBOARD_CHUNK: u16 = 0x0028;
 
 /// Most monitors a `Screen` may list.
 pub const MAX_MONITORS: usize = 32;
@@ -81,6 +92,13 @@ pub const REGISTRY: &[TypeInfo] = &[
     info(MOTION_EVENT, "MotionEvent", Direction::AgentToService),
     info(SCREEN, "Screen", Direction::AgentToService),
     info(PONG, "Pong", Direction::AgentToService),
+    info(CLIPBOARD_TEXT, "ClipboardText", Direction::AgentToService),
+    info(CLIPBOARD_CHUNK, "ClipboardChunk", Direction::AgentToService),
+    info(
+        CLIPBOARD_NOT_SHARED,
+        "ClipboardNotShared",
+        Direction::AgentToService,
+    ),
     info(SET_CAPTURE, "SetCapture", Direction::ServiceToAgent),
     info(INJECT_KEY, "InjectKey", Direction::ServiceToAgent),
     info(INJECT_BUTTON, "InjectButton", Direction::ServiceToAgent),
@@ -88,6 +106,12 @@ pub const REGISTRY: &[TypeInfo] = &[
     info(INJECT_MOTION, "InjectMotion", Direction::ServiceToAgent),
     info(WARP, "Warp", Direction::ServiceToAgent),
     info(PING, "Ping", Direction::ServiceToAgent),
+    info(SET_CLIPBOARD, "SetClipboard", Direction::ServiceToAgent),
+    info(
+        SET_CLIPBOARD_CHUNK,
+        "SetClipboardChunk",
+        Direction::ServiceToAgent,
+    ),
     info(ui::OPEN_PAIRING, "OpenPairing", Direction::UiToService),
     info(ui::CLOSE_PAIRING, "ClosePairing", Direction::UiToService),
     info(ui::JOIN, "Join", Direction::UiToService),
@@ -401,6 +425,12 @@ pub enum ToService {
         service: Millis,
         agent: Millis,
     },
+    /// A run of copied text starts: its length in bytes of UTF-8.
+    ClipboardText(u32),
+    /// Copied text bytes within the run; 1 to 65,536 of them.
+    ClipboardChunk(Vec<u8>),
+    /// The newest copy is not shared.
+    ClipboardNotShared(NotShared),
 }
 
 impl ToService {
@@ -414,6 +444,9 @@ impl ToService {
             },
             Self::Screen(_) => SCREEN,
             Self::Pong { .. } => PONG,
+            Self::ClipboardText(_) => CLIPBOARD_TEXT,
+            Self::ClipboardChunk(_) => CLIPBOARD_CHUNK,
+            Self::ClipboardNotShared(_) => CLIPBOARD_NOT_SHARED,
         }
     }
 
@@ -468,6 +501,9 @@ impl ToService {
                 p.extend_from_slice(&service.0.to_le_bytes());
                 p.extend_from_slice(&agent.0.to_le_bytes());
             }
+            Self::ClipboardText(len) => p.extend_from_slice(&text_len(*len)?.to_le_bytes()),
+            Self::ClipboardChunk(bytes) => p.extend_from_slice(chunk(bytes)?),
+            Self::ClipboardNotShared(why) => p.push(why.code()),
         }
         Ok(p)
     }
@@ -535,11 +571,51 @@ impl ToService {
                     agent: Millis(f.u64()?),
                 }
             }
+            CLIPBOARD_TEXT => Self::ClipboardText(decode_text_len(ty, payload, &mut f)?),
+            CLIPBOARD_CHUNK => Self::ClipboardChunk(decode_chunk(ty, payload, &mut f)?),
+            CLIPBOARD_NOT_SHARED => {
+                exactly(ty, payload, 1)?;
+                Self::ClipboardNotShared(NotShared::from_code(ty, f.u8()?)?)
+            }
             _ => return Err(ProtocolError::UnknownType { ty }),
         };
         f.end()?;
         Ok(message)
     }
+}
+
+/// A run's length, if it is within the limit.
+const fn text_len(len: u32) -> Result<u32, EncodeError> {
+    if len > MAX_TEXT_LEN {
+        Err(EncodeError::InvalidField)
+    } else {
+        Ok(len)
+    }
+}
+
+/// A chunk's bytes, if there are 1 to [`frame::MAX_PAYLOAD`] of them.
+fn chunk(bytes: &[u8]) -> Result<&[u8], EncodeError> {
+    if bytes.is_empty() || bytes.len() > frame::MAX_PAYLOAD {
+        Err(EncodeError::InvalidField)
+    } else {
+        Ok(bytes)
+    }
+}
+
+fn decode_text_len(ty: u16, payload: &[u8], f: &mut Fields<'_>) -> Result<u32, ProtocolError> {
+    exactly(ty, payload, 4)?;
+    let len = f.u32()?;
+    if len > MAX_TEXT_LEN {
+        return Err(ProtocolError::InvalidField { ty });
+    }
+    Ok(len)
+}
+
+fn decode_chunk(ty: u16, payload: &[u8], f: &mut Fields<'_>) -> Result<Vec<u8>, ProtocolError> {
+    if payload.is_empty() {
+        return Err(ProtocolError::InvalidField { ty });
+    }
+    Ok(f.bytes(payload.len())?.to_vec())
 }
 
 fn decode_screen(f: &mut Fields<'_>) -> Result<Screen, ProtocolError> {
@@ -676,6 +752,67 @@ impl ToAgent {
         };
         f.end()?;
         Ok(message)
+    }
+}
+
+/// Clipboard text from the service to an agent. Kept apart from [`ToAgent`],
+/// which stays `Copy` with fixed layouts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClipboardToAgent {
+    /// A run of text to set starts: its length in bytes of UTF-8.
+    Set(u32),
+    /// Text bytes within the run; 1 to 65,536 of them.
+    Chunk(Vec<u8>),
+}
+
+impl ClipboardToAgent {
+    pub const fn ty(&self) -> u16 {
+        match self {
+            Self::Set(_) => SET_CLIPBOARD,
+            Self::Chunk(_) => SET_CLIPBOARD_CHUNK,
+        }
+    }
+
+    pub fn payload(&self) -> Result<Vec<u8>, EncodeError> {
+        Ok(match self {
+            Self::Set(len) => text_len(*len)?.to_le_bytes().to_vec(),
+            Self::Chunk(bytes) => chunk(bytes)?.to_vec(),
+        })
+    }
+
+    pub fn encode_frame(&self, out: &mut Vec<u8>) -> Result<(), EncodeError> {
+        frame::encode(self.ty(), &self.payload()?, out)
+    }
+
+    /// Decodes a clipboard message an agent received, after `Hello`.
+    pub fn decode(ty: u16, payload: &[u8], version: u16) -> Result<Self, ProtocolError> {
+        check(ty, Direction::ServiceToAgent, version)?;
+        let mut f = Fields::new(ty, payload);
+        let message = match ty {
+            SET_CLIPBOARD => Self::Set(decode_text_len(ty, payload, &mut f)?),
+            SET_CLIPBOARD_CHUNK => Self::Chunk(decode_chunk(ty, payload, &mut f)?),
+            _ => return Err(ProtocolError::UnknownType { ty }),
+        };
+        f.end()?;
+        Ok(message)
+    }
+}
+
+/// Any message an agent receives after `Hello`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ToAgentAny {
+    Command(ToAgent),
+    Clipboard(ClipboardToAgent),
+}
+
+impl ToAgentAny {
+    pub fn decode(ty: u16, payload: &[u8], version: u16) -> Result<Self, ProtocolError> {
+        match ty {
+            SET_CLIPBOARD | SET_CLIPBOARD_CHUNK => {
+                ClipboardToAgent::decode(ty, payload, version).map(Self::Clipboard)
+            }
+            _ => ToAgent::decode(ty, payload, version).map(Self::Command),
+        }
     }
 }
 
@@ -850,6 +987,115 @@ mod tests {
             ToService::decode(HELLO, &[1, 0, 1, 0, 1], 1),
             Err(ProtocolError::DuplicateHello)
         );
+    }
+
+    #[test]
+    fn clipboard_messages() {
+        let services = [
+            ToService::ClipboardText(0),
+            ToService::ClipboardText(MAX_TEXT_LEN),
+            ToService::ClipboardChunk(b"x".to_vec()),
+            ToService::ClipboardChunk(vec![7; frame::MAX_PAYLOAD]),
+            ToService::ClipboardNotShared(NotShared::Private),
+            ToService::ClipboardNotShared(NotShared::TooLarge),
+        ];
+        for m in services {
+            let p = m.payload().unwrap();
+            assert_eq!(ToService::decode(m.ty(), &p, 1), Ok(m.clone()), "{m:?}");
+        }
+        let agents = [
+            ClipboardToAgent::Set(5),
+            ClipboardToAgent::Set(MAX_TEXT_LEN),
+            ClipboardToAgent::Chunk(b"world".to_vec()),
+        ];
+        for m in agents {
+            let p = m.payload().unwrap();
+            assert_eq!(
+                ToAgentAny::decode(m.ty(), &p, 1),
+                Ok(ToAgentAny::Clipboard(m.clone()))
+            );
+        }
+
+        // Fixed layouts, one byte short and one long.
+        for (ty, len) in [(CLIPBOARD_TEXT, 4), (CLIPBOARD_NOT_SHARED, 1)] {
+            for n in [len - 1, len + 1] {
+                assert!(
+                    ToService::decode(ty, &vec![0; n], 1).is_err(),
+                    "{ty:#x} {n}"
+                );
+            }
+        }
+        for n in [3, 5] {
+            assert!(ClipboardToAgent::decode(SET_CLIPBOARD, &vec![0; n], 1).is_err());
+        }
+
+        // Limits.
+        let over = (MAX_TEXT_LEN + 1).to_le_bytes();
+        assert_eq!(
+            ToService::decode(CLIPBOARD_TEXT, &over, 1),
+            Err(ProtocolError::InvalidField { ty: CLIPBOARD_TEXT })
+        );
+        assert_eq!(
+            ClipboardToAgent::decode(SET_CLIPBOARD, &over, 1),
+            Err(ProtocolError::InvalidField { ty: SET_CLIPBOARD })
+        );
+        assert_eq!(
+            ToService::decode(CLIPBOARD_CHUNK, &[], 1),
+            Err(ProtocolError::InvalidField {
+                ty: CLIPBOARD_CHUNK
+            })
+        );
+        assert_eq!(
+            ClipboardToAgent::decode(SET_CLIPBOARD_CHUNK, &[], 1),
+            Err(ProtocolError::InvalidField {
+                ty: SET_CLIPBOARD_CHUNK
+            })
+        );
+        assert_eq!(
+            ToService::decode(CLIPBOARD_NOT_SHARED, &[3], 1),
+            Err(ProtocolError::InvalidCode {
+                ty: CLIPBOARD_NOT_SHARED,
+                value: 3
+            })
+        );
+        assert!(
+            ToService::ClipboardText(MAX_TEXT_LEN + 1)
+                .payload()
+                .is_err()
+        );
+        assert!(ToService::ClipboardChunk(Vec::new()).payload().is_err());
+        assert!(
+            ToService::ClipboardChunk(vec![0; frame::MAX_PAYLOAD + 1])
+                .payload()
+                .is_err()
+        );
+        assert!(ClipboardToAgent::Chunk(Vec::new()).payload().is_err());
+
+        // Each travels one way, on the agent link only.
+        assert_eq!(
+            ToService::decode(SET_CLIPBOARD, &[0; 4], 1),
+            Err(ProtocolError::WrongDirection { ty: SET_CLIPBOARD })
+        );
+        assert_eq!(
+            ToAgentAny::decode(CLIPBOARD_TEXT, &[0; 4], 1),
+            Err(ProtocolError::WrongDirection { ty: CLIPBOARD_TEXT })
+        );
+        for ty in [
+            CLIPBOARD_TEXT,
+            CLIPBOARD_CHUNK,
+            CLIPBOARD_NOT_SHARED,
+            SET_CLIPBOARD,
+            SET_CLIPBOARD_CHUNK,
+        ] {
+            assert_eq!(
+                ui::UiCommand::decode(ty, &[0; 4], 1),
+                Err(ProtocolError::WrongDirection { ty })
+            );
+            assert_eq!(
+                check(ty, Direction::ServiceToUi, 1),
+                Err(ProtocolError::WrongDirection { ty })
+            );
+        }
     }
 
     #[test]

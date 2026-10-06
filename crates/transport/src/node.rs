@@ -13,6 +13,7 @@ use pairing::{
     UnixTime,
 };
 use proto::CloseReason;
+use proto::clipboard::ClipboardMessage;
 use proto::pairing::{PairingMessage, RecordsDone};
 use rand_core::OsRng;
 use tokio::sync::{mpsc, oneshot};
@@ -106,6 +107,22 @@ pub enum Event {
         peer: PeerId,
         msg: PeerMessage,
     },
+    /// An up member has a new shareable copy with this ID.
+    ClipboardOffer {
+        peer: PeerId,
+        id: u64,
+    },
+    /// An up member asks for this machine's copy with this ID.
+    ClipboardRequest {
+        peer: PeerId,
+        id: u64,
+    },
+    /// Clipboard text an up member sent on a clipboard stream.
+    ClipboardText {
+        peer: PeerId,
+        id: u64,
+        text: Arc<str>,
+    },
 }
 
 /// Pairing mode could not open: no IPv4 network.
@@ -129,6 +146,8 @@ enum Command {
     Resume,
     Sighting(Sighting),
     Send(PeerId, PeerMessage),
+    Clipboard(PeerId, ClipboardMessage),
+    SendClipboard(PeerId, u64, Arc<str>),
     Connections(oneshot::Sender<Vec<Connection>>),
     Shutdown,
 }
@@ -196,6 +215,24 @@ impl NodeHandle {
     /// The engine learns the peer is gone from `Event::PeerDown`.
     pub fn send(&self, peer: PeerId, msg: PeerMessage) {
         let _ = self.tx.send(Command::Send(peer, msg));
+    }
+
+    /// Tells peer, if it is up, that this machine has a new shareable copy.
+    pub fn offer_clipboard(&self, peer: PeerId, id: u64) {
+        let msg = ClipboardMessage::Offer { id };
+        let _ = self.tx.send(Command::Clipboard(peer, msg));
+    }
+
+    /// Asks peer, if it is up, for its copy with this ID.
+    pub fn request_clipboard(&self, peer: PeerId, id: u64) {
+        let msg = ClipboardMessage::Request { id };
+        let _ = self.tx.send(Command::Clipboard(peer, msg));
+    }
+
+    /// Sends clipboard text to peer, if it is up, on a clipboard stream of
+    /// its own. Text over the transfer limit is not sent.
+    pub fn send_clipboard(&self, peer: PeerId, id: u64, text: Arc<str>) {
+        let _ = self.tx.send(Command::SendClipboard(peer, id, text));
     }
 
     /// How many member connections are open, for diagnostics.
@@ -279,6 +316,10 @@ pub(crate) enum Internal {
     Message(ConnId, u16, Vec<u8>),
     /// An engine message from a member connection, already decoded.
     Peer(ConnId, PeerMessage),
+    /// A clipboard offer or request from a member connection.
+    Clipboard(ConnId, ClipboardMessage),
+    /// Complete clipboard text from a member connection's clipboard stream.
+    ClipboardText(ConnId, u64, Arc<str>),
     Closed(ConnId, Cause),
 }
 
@@ -518,6 +559,19 @@ impl Node {
                     conn.send(Out::Peer(msg));
                 }
             }
+            Command::Clipboard(peer, msg) => {
+                let mut frame = Vec::new();
+                if let Some(conn) = self.up.get(&peer).and_then(|id| self.conns.get(id))
+                    && msg.encode(&mut frame).is_ok()
+                {
+                    conn.send(Out::Frame(frame));
+                }
+            }
+            Command::SendClipboard(peer, id, text) => {
+                if let Some(conn) = self.up.get(&peer).and_then(|id| self.conns.get(id)) {
+                    conn.send(Out::Transfer(id, text));
+                }
+            }
             Command::Connections(reply) => {
                 let open = self
                     .conns
@@ -578,6 +632,23 @@ impl Node {
             Internal::Ready(id) => self.ready(id),
             Internal::Message(id, ty, payload) => self.message(id, ty, &payload),
             Internal::Peer(id, msg) => self.peer_message(id, msg),
+            Internal::Clipboard(id, msg) => {
+                if let Some(peer) = self.up_peer(id) {
+                    self.emit(match msg {
+                        ClipboardMessage::Offer { id } => Event::ClipboardOffer { peer, id },
+                        ClipboardMessage::Request { id } => Event::ClipboardRequest { peer, id },
+                    });
+                }
+            }
+            Internal::ClipboardText(id, clip, text) => {
+                if let Some(peer) = self.up_peer(id) {
+                    self.emit(Event::ClipboardText {
+                        peer,
+                        id: clip,
+                        text,
+                    });
+                }
+            }
             Internal::Closed(id, cause) => self.closed(id, cause),
         }
     }
@@ -793,6 +864,12 @@ impl Node {
                 msg,
             });
         }
+    }
+
+    /// The peer whose current up connection is id, if it is one.
+    fn up_peer(&self, id: ConnId) -> Option<PeerId> {
+        let conn = self.conns.get(&id)?;
+        (self.up.get(&conn.peer) == Some(&id)).then_some(conn.peer)
     }
 
     fn message(&mut self, id: ConnId, ty: u16, payload: &[u8]) {

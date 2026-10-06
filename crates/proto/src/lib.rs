@@ -20,6 +20,7 @@
     )
 )]
 
+pub mod clipboard;
 pub mod codec;
 pub mod datagram;
 pub mod error;

@@ -52,6 +52,10 @@ fn transport_config() -> Arc<quinn::TransportConfig> {
     config.keep_alive_interval(Some(KEEPALIVE));
     // 1 s fits in a VarInt of milliseconds.
     config.max_idle_timeout(quinn::IdleTimeout::try_from(IDLE_TIMEOUT).ok());
+    // The peer may open the control stream and one clipboard stream at a
+    // time; flow control holds the next transfer until the first ends.
+    config.max_concurrent_bidi_streams(1u8.into());
+    config.max_concurrent_uni_streams(1u8.into());
     Arc::new(config)
 }
 

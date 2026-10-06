@@ -3,9 +3,11 @@
 //! connected UI (add-ui-link design D4).
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 use std::time::Duration;
 
 use engine::{CaptureMode, Decision, Engine, Event as EngineEvent, FocusView, Tuning};
+use ipc::clipboard::Copied;
 use ipc::link::{AgentHandle, FromAgent, UiHandle};
 use ipc::message::ToAgent;
 use ipc::ui::{
@@ -14,10 +16,12 @@ use ipc::ui::{
 };
 use model::{LayoutBook, Millis, PeerId, Side};
 use pairing::{Code, CodeError, Desk, JoinFailure, MachineName, ModeClosed, WINDOW_MS};
+use rand_core::{OsRng, RngCore};
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::Instant;
 use transport::{Down, Event as NodeEvent, NoNetwork, NodeHandle, StartError};
 
+use crate::clipboard::{self, Tracker};
 use crate::log::Log;
 use crate::store::{self, StoreHandle};
 use crate::{info, warn};
@@ -192,6 +196,8 @@ pub fn start(
         from_ui,
         pairing: None,
         dirty: false,
+        focus: FocusView::Local,
+        clipboard: Tracker::default(),
     };
     let task = tokio::spawn(host.run(node_events, links, uis, from_ui_rx, commands));
     Ok(Running { node, task })
@@ -219,6 +225,10 @@ struct Host {
     pairing: Option<(Code, Millis)>,
     /// Something in `Status` changed since UIs were last sent one.
     dirty: bool,
+    /// The focus the engine last reported, to see the cursor arrive.
+    focus: FocusView,
+    /// Which copy is newest and what to fetch or serve. Never logged.
+    clipboard: Tracker,
 }
 
 /// The next event from the current link, or `None` when it ends. Pends
@@ -464,6 +474,58 @@ impl Host {
                 info!(self.log, "screen: {} monitor(s)", screen.monitors.len());
                 self.engine(EngineEvent::ScreenChanged(screen));
             }
+            FromAgent::Clipboard(Copied::Text(text)) => {
+                let id = OsRng.next_u64();
+                info!(self.log, "clipboard: offered {} bytes", text.len());
+                self.clipboard.local_text(id, Arc::from(text));
+                for &peer in &self.up {
+                    self.node.offer_clipboard(peer, id);
+                }
+            }
+            FromAgent::Clipboard(Copied::NotShared(why)) => {
+                info!(self.log, "clipboard: copy not shared ({why:?})");
+                self.clipboard.local_not_shared();
+            }
+        }
+    }
+
+    /// The cursor arrived here: fetch the newest copy if a member holds it.
+    fn cursor_arrived(&mut self) {
+        let up = &self.up;
+        let now = Instant::now().into_std();
+        if let Some((peer, id)) = self.clipboard.arrived(|p| up.contains(&p), now) {
+            self.node.request_clipboard(peer, id);
+        }
+    }
+
+    fn on_clipboard(&mut self, event: NodeEvent) {
+        match event {
+            NodeEvent::ClipboardOffer { peer, id } => self.clipboard.offer(peer, id),
+            NodeEvent::ClipboardRequest { peer, id } => {
+                if let Some(text) = self.clipboard.request(id) {
+                    info!(
+                        self.log,
+                        "clipboard: sent {} bytes to {}",
+                        text.len(),
+                        self.name(peer)
+                    );
+                    self.node.send_clipboard(peer, id, text);
+                }
+            }
+            NodeEvent::ClipboardText { peer, id, text } => {
+                if let Some(text) = self.clipboard.received(peer, id, text) {
+                    info!(
+                        self.log,
+                        "clipboard: set {} bytes from {}",
+                        text.len(),
+                        self.name(peer)
+                    );
+                    if let Some(link) = &self.link {
+                        let _ = link.handle.set_clipboard(&text);
+                    }
+                }
+            }
+            _ => {}
         }
     }
 
@@ -499,6 +561,10 @@ impl Host {
                     }
                     self.report(Report::Focus { focus, name });
                     self.dirty = true;
+                    let before = std::mem::replace(&mut self.focus, focus);
+                    if clipboard::arrived(before, focus) {
+                        self.cursor_arrived();
+                    }
                 }
                 Decision::LayoutsChanged(book) => {
                     self.store
@@ -557,7 +623,14 @@ impl Host {
     // ---- node ----
 
     fn on_node(&mut self, event: NodeEvent) {
-        if !matches!(event, NodeEvent::Message { .. } | NodeEvent::Addresses(_)) {
+        if !matches!(
+            event,
+            NodeEvent::Message { .. }
+                | NodeEvent::Addresses(_)
+                | NodeEvent::ClipboardOffer { .. }
+                | NodeEvent::ClipboardRequest { .. }
+                | NodeEvent::ClipboardText { .. }
+        ) {
             self.dirty = true;
         }
         match event {
@@ -612,6 +685,7 @@ impl Host {
                 let name = self.name(peer);
                 info!(self.log, "{name} is down: {why:?}");
                 self.report(Report::PeerDown { peer, name, why });
+                self.clipboard.peer_down(peer);
                 self.engine(EngineEvent::PeerLost(peer));
             }
             NodeEvent::TrustStore(bytes) => {
@@ -626,6 +700,9 @@ impl Host {
                     .write(store::ADDRESSES, store::addresses_to_json(&addresses));
             }
             NodeEvent::Message { peer, msg } => self.engine(EngineEvent::FromPeer { peer, msg }),
+            event @ (NodeEvent::ClipboardOffer { .. }
+            | NodeEvent::ClipboardRequest { .. }
+            | NodeEvent::ClipboardText { .. }) => self.on_clipboard(event),
         }
     }
 

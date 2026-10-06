@@ -54,11 +54,26 @@ pub const SECURE_ATTENTION: u16 = 0x000f;
 /// Forwarded motion as running totals. Datagram only.
 pub const MOTION: u16 = 0x0010;
 
+/// A new shareable copy on the sender, by ID; no text.
+pub const CLIPBOARD_OFFER: u16 = 0x0011;
+
+/// Asks the receiver for its copy with this ID.
+pub const CLIPBOARD_REQUEST: u16 = 0x0012;
+
+/// Starts a clipboard stream: the copy's ID and the text's length.
+pub const CLIPBOARD_DATA: u16 = 0x0013;
+
+/// Text bytes on a clipboard stream.
+pub const CLIPBOARD_CHUNK: u16 = 0x0014;
+
 /// Where a message type may be sent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Channel {
+    /// The control stream.
     Stream,
     Datagram,
+    /// A unidirectional stream carrying one clipboard transfer.
+    Transfer,
 }
 
 /// One registered message type.
@@ -89,6 +104,10 @@ pub const REGISTRY: &[TypeInfo] = &[
     stream(WHEEL_INPUT, "WheelInput"),
     stream(SECURE_ATTENTION, "SecureAttention"),
     datagram(MOTION, "Motion"),
+    stream(CLIPBOARD_OFFER, "ClipboardOffer"),
+    stream(CLIPBOARD_REQUEST, "ClipboardRequest"),
+    transfer(CLIPBOARD_DATA, "ClipboardData"),
+    transfer(CLIPBOARD_CHUNK, "ClipboardChunk"),
 ];
 
 /// A stream message type introduced in version 1.
@@ -107,6 +126,16 @@ const fn datagram(ty: u16, name: &'static str) -> TypeInfo {
         ty,
         name,
         channel: Channel::Datagram,
+        since: 1,
+    }
+}
+
+/// A clipboard-stream message type introduced in version 1.
+const fn transfer(ty: u16, name: &'static str) -> TypeInfo {
+    TypeInfo {
+        ty,
+        name,
+        channel: Channel::Transfer,
         since: 1,
     }
 }
@@ -136,7 +165,7 @@ mod tests {
 
     #[test]
     fn version_1_defines_exactly_these_types() {
-        use Channel::{Datagram, Stream};
+        use Channel::{Datagram, Stream, Transfer};
         let names: Vec<_> = REGISTRY.iter().map(|i| (i.ty, i.name, i.channel)).collect();
         assert_eq!(
             names,
@@ -157,14 +186,18 @@ mod tests {
                 (0x000e, "WheelInput", Stream),
                 (0x000f, "SecureAttention", Stream),
                 (0x0010, "Motion", Datagram),
+                (0x0011, "ClipboardOffer", Stream),
+                (0x0012, "ClipboardRequest", Stream),
+                (0x0013, "ClipboardData", Transfer),
+                (0x0014, "ClipboardChunk", Transfer),
             ]
         );
         for info in REGISTRY {
             assert_eq!(check(info.ty, info.channel, 1), Ok(info));
         }
         assert_eq!(
-            check(0x0011, Channel::Stream, 1),
-            Err(ProtocolError::UnknownType { ty: 0x0011 })
+            check(0x0015, Channel::Stream, 1),
+            Err(ProtocolError::UnknownType { ty: 0x0015 })
         );
     }
 
@@ -213,6 +246,28 @@ mod tests {
         assert_eq!(
             check(HELLO, Channel::Datagram, 1),
             Err(ProtocolError::WrongChannel { ty: HELLO })
+        );
+    }
+
+    #[test]
+    fn clipboard_types_keep_to_their_streams() {
+        for ty in [CLIPBOARD_OFFER, CLIPBOARD_REQUEST] {
+            assert!(check(ty, Channel::Stream, 1).is_ok());
+            assert_eq!(
+                check(ty, Channel::Transfer, 1),
+                Err(ProtocolError::WrongChannel { ty })
+            );
+        }
+        for ty in [CLIPBOARD_DATA, CLIPBOARD_CHUNK] {
+            assert!(check(ty, Channel::Transfer, 1).is_ok());
+            assert_eq!(
+                check(ty, Channel::Stream, 1),
+                Err(ProtocolError::WrongChannel { ty })
+            );
+        }
+        assert_eq!(
+            check(KEY_INPUT, Channel::Transfer, 1),
+            Err(ProtocolError::WrongChannel { ty: KEY_INPUT })
         );
     }
 

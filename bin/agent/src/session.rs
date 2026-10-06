@@ -8,11 +8,13 @@
 use std::process::ExitCode;
 use std::time::Duration;
 
-use ipc::link::AgentEnd;
+use ipc::clipboard::NotShared;
+use ipc::link::{AgentEnd, Closed, FromService, ServiceHandle};
 use ipc::message::{ToAgent, ToService};
 use tokio::net::windows::named_pipe::{ClientOptions, NamedPipeClient};
 use tokio::sync::mpsc;
 use tokio::time::Instant;
+use win32_clipboard::Copied;
 use win32_input::{Capture, Captured};
 
 /// `ERROR_PIPE_BUSY`: every instance of the pipe is in use.
@@ -78,19 +80,27 @@ async fn session(pipe: &str) -> ExitCode {
 
     // Capture reports on a std channel; a thread moves them onto the link's
     // runtime. It ends when the capture is dropped.
-    let (events_tx, mut events) = mpsc::unbounded_channel();
-    std::thread::spawn(move || {
-        while let Ok(c) = captured.recv() {
-            if events_tx.send(c).is_err() {
-                break;
-            }
+    let events = bridge(captured);
+
+    // The clipboard is a convenience: without it, input still works.
+    let (clipboard, mut copies) = match win32_clipboard::start() {
+        Ok((clipboard, copied)) => (Some(clipboard), bridge(copied)),
+        Err(e) => {
+            eprintln!("deskhop-agent: clipboard unavailable: {e}");
+            (None, mpsc::unbounded_channel().1)
         }
-    });
+    };
+    let mut events = events;
 
     loop {
         tokio::select! {
             cmd = commands.recv() => match cmd {
-                Some(cmd) => apply(&capture, cmd),
+                Some(FromService::Command(cmd)) => apply(&capture, cmd),
+                Some(FromService::SetClipboard(text)) => {
+                    if let Some(c) = &clipboard {
+                        c.set(text);
+                    }
+                }
                 None => break,
             },
             event = events.recv() => {
@@ -99,11 +109,42 @@ async fn session(pipe: &str) -> ExitCode {
                     break;
                 }
             }
+            Some(copied) = copies.recv() => {
+                if report_copy(&reports, copied).is_err() {
+                    break;
+                }
+            }
         }
     }
     // Pass all and unhook before anything else.
     drop(capture);
+    drop(clipboard);
     ExitCode::SUCCESS
+}
+
+/// Moves items from a worker's std channel onto the link's runtime, on a
+/// thread that ends when the worker drops its sender.
+fn bridge<T: Send + 'static>(from: std::sync::mpsc::Receiver<T>) -> mpsc::UnboundedReceiver<T> {
+    let (tx, rx) = mpsc::unbounded_channel();
+    std::thread::spawn(move || {
+        while let Ok(item) = from.recv() {
+            if tx.send(item).is_err() {
+                break;
+            }
+        }
+    });
+    rx
+}
+
+/// Reports a settled copy: its text as a run, or why it is not shared.
+fn report_copy(reports: &ServiceHandle, copied: Copied) -> Result<(), Closed> {
+    let why = match copied {
+        Copied::Text(text) => return reports.send_clipboard_text(&text),
+        Copied::Private => NotShared::Private,
+        Copied::NoText => NotShared::NoText,
+        Copied::TooLarge => NotShared::TooLarge,
+    };
+    reports.send(ToService::ClipboardNotShared(why))
 }
 
 fn report(c: Captured) -> ToService {

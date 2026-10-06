@@ -2,6 +2,7 @@
 //! lies inside its input. Deterministic, so it runs in `cargo test` on stable;
 //! `tools/fuzz` covers the same drivers with coverage guidance.
 
+use proto::clipboard::{self, ClipboardMessage, TransferReader, TransferStep};
 use proto::datagram::MAX_DATAGRAM_LEN;
 use proto::frame::{self, Decoded, HEADER_LEN};
 use proto::hello::Hello;
@@ -43,6 +44,7 @@ impl Rng {
 /// fails, handing each to the session as a control or other-stream frame.
 fn drive_stream(session: &mut Session, input: &[u8], rng: &mut Rng) {
     let mut rest = input;
+    let mut transfer = TransferReader::new();
     loop {
         match frame::decode(rest) {
             Ok(Decoded::NeedMore) | Err(_) => return,
@@ -57,7 +59,10 @@ fn drive_stream(session: &mut Session, input: &[u8], rng: &mut Rng) {
                     }
                 } else {
                     match session.on_stream_frame(frame) {
-                        Ok(StreamEvent::Message(m)) => Some(m),
+                        Ok(StreamEvent::Message(m)) => {
+                            read_transfer(&mut transfer, m);
+                            Some(m)
+                        }
                         Ok(StreamEvent::Wait) => None,
                         Err(_) => return,
                     }
@@ -86,6 +91,20 @@ fn decode_payload(m: Message<'_>) {
         assert_eq!(decoded.ty(), m.info.ty);
         assert_eq!(decoded.payload(), m.payload);
     }
+    if let Ok(decoded) = ClipboardMessage::decode(m.info.ty, m.payload) {
+        assert_eq!(decoded.ty(), m.info.ty);
+        assert_eq!(decoded.payload(), m.payload);
+    }
+}
+
+/// Feeds a clipboard-stream message to the reader: a chunk is exactly the
+/// frame's payload, and finishing at any point never panics.
+fn read_transfer(reader: &mut TransferReader, m: Message<'_>) {
+    if let Ok(TransferStep::Chunk(c)) = reader.on_message(m.info.ty, m.payload) {
+        assert_eq!(c, m.payload);
+        let _ = clipboard::text(c);
+    }
+    let _ = reader.finish();
 }
 
 fn agreed_session() -> Session {
@@ -106,14 +125,28 @@ fn valid_frames(rng: &mut Rng) -> Vec<u8> {
     let mut out = Vec::new();
     Hello::this_release().encode_frame(&mut out).unwrap();
     for _ in 0..rng.below(4) {
-        let pick = rng.below(3);
+        let pick = rng.below(5);
         if pick == 0 {
             pairing_message(rng).encode_frame(&mut out).unwrap();
         } else if pick == 1 {
             let m = input_message(rng);
             frame::encode(m.ty(), &m.payload(), &mut out).unwrap();
+        } else if pick == 2 {
+            let id = rng.next();
+            let m = if rng.below(2) == 0 {
+                ClipboardMessage::Offer { id }
+            } else {
+                ClipboardMessage::Request { id }
+            };
+            m.encode(&mut out).unwrap();
+        } else if pick == 3 {
+            let text = rng.bytes_below(24);
+            clipboard::encode_data(rng.next(), text.len() as u32, &mut out).unwrap();
+            for chunk in text.chunks(1 + rng.below(8)) {
+                clipboard::encode_chunk(chunk, &mut out).unwrap();
+            }
         } else {
-            let ty = rng.below(0x12) as u16;
+            let ty = rng.below(0x16) as u16;
             let payload = rng.bytes_below(12);
             frame::encode(ty, &payload, &mut out).unwrap();
         }

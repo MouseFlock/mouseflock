@@ -140,7 +140,8 @@ impl Session {
         }
     }
 
-    /// Handles a frame from any stream other than the control stream.
+    /// Handles a frame from any stream other than the control stream. The only
+    /// such streams are clipboard streams, so only their types are accepted.
     pub fn on_stream_frame<'a>(&self, frame: Frame<'a>) -> Result<StreamEvent<'a>, SessionError> {
         if frame.ty == registry::HELLO {
             return Err(ProtocolError::HelloOutsideControlStream.into());
@@ -150,7 +151,7 @@ impl Session {
             State::AwaitingHello => Ok(StreamEvent::Wait),
             State::Agreed(version) => Ok(StreamEvent::Message(message(
                 frame,
-                Channel::Stream,
+                Channel::Transfer,
                 version,
             )?)),
         }
