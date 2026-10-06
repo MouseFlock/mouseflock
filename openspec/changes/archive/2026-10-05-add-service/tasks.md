@@ -146,4 +146,4 @@
   - restart both and cross again without pairing or learning.
   If a second PC is not available, record that and leave this task open.
 
-  Open: no second PC was available on 2026-10-05. The same path (pair through commands, learn by pushing, cross, inject, cross back, restart and cross again) is covered in-process by the host tests over loopback.
+  Deferred by the user on 2026-10-05: no second PC was available. Carry this check, with the end-to-end Ctrl+Alt+End check, into the next change that runs on two PCs. The same path (pair through commands, learn by pushing, cross, inject, cross back, restart and cross again) is covered in-process by the host tests over loopback.
