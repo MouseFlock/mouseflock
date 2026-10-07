@@ -14,8 +14,11 @@ Run from an elevated PowerShell (Run as administrator), from anywhere:
 
 A SYSTEM service must never run from a folder users can write, such as this
 repository, so install copies the binaries to "Program Files\DeskHop Dev".
-Every change to the system is printed. The installer (add-installer) takes
-these steps over later.
+Every change to the system is printed.
+
+This is for development only; users install DeskHop's package
+(installer\build.ps1). The two register the same service name, so each
+refuses to install while the other is installed.
 #>
 param(
     [Parameter(Mandatory = $true, Position = 0)]
@@ -48,6 +51,16 @@ function Assert-Elevated {
 
 function Get-DeskHopService { Get-Service -Name $Name -ErrorAction SilentlyContinue }
 
+# The package registers the same service name; the two never coexist, and this
+# script never touches the package's service (add-installer design D8).
+function Assert-NotInstalled {
+    $installed = (Get-ItemProperty -Path 'HKLM:\SOFTWARE\DeskHop' -Name InstallFolder -ErrorAction SilentlyContinue).InstallFolder
+    if ($installed) {
+        Write-Host "DeskHop is installed in $installed by its setup program. Use Settings > Apps > DeskHop instead. Nothing was changed."
+        exit 1
+    }
+}
+
 function Stop-DeskHop {
     $svc = Get-DeskHopService
     if ($svc -and $svc.Status -ne 'Stopped') {
@@ -59,6 +72,7 @@ function Stop-DeskHop {
 switch ($Action) {
     'install' {
         Assert-Elevated
+        Assert-NotInstalled
         Push-Location $Repo
         try {
             cargo build -p deskhop-service -p deskhop-agent
@@ -103,6 +117,8 @@ switch ($Action) {
 
     'uninstall' {
         Assert-Elevated
+        # The service of the same name may be the package's; never remove that.
+        Assert-NotInstalled
         Stop-DeskHop
         if (Get-DeskHopService) {
             sc.exe delete $Name | Out-Null

@@ -153,3 +153,7 @@ tools/fuzz/target/
 tools/fuzz/corpus/
 tools/fuzz/artifacts/
 tools/fuzz/coverage/
+
+# WiX build output (installer/out is covered by `out` above)
+installer/obj/
+installer/bin/

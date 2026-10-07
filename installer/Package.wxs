@@ -1,0 +1,153 @@
+<!--
+  What installing DeskHop does to a PC (spec: installer; add-installer design
+  D3-D8). One per-machine package per architecture.
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util"
+     xmlns:fw="http://wixtoolset.org/schemas/v4/wxs/firewall">
+  <Package Name="DeskHop"
+           Manufacturer="DeskHop"
+           Version="$(ProductVersion)"
+           UpgradeCode="{057CBB71-0D2E-4746-B0C4-E2510478D092}"
+           Scope="perMachine"
+           InstallerVersion="500"
+           Compressed="yes"
+           ProductCode="$(ProductCode)">
+
+    <!-- D3: a newer version replaces the old one in one transaction; an older one is refused. -->
+    <MajorUpgrade AllowSameVersionUpgrades="yes"
+                  Schedule="afterInstallInitialize"
+                  DowngradeErrorMessage="A newer version of DeskHop is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <Icon Id="DeskHop.ico" SourceFile="$(Icon)" />
+    <Property Id="ARPPRODUCTICON" Value="DeskHop.ico" />
+    <Property Id="ARPNOMODIFY" Value="1" />
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/sharatk/DeskHop" />
+
+    <!--
+      D3, D11: Windows checks for files in use at InstallValidate, before any
+      of DeskHop's own steps can run, and finds the agents and tray apps
+      holding their programs. Run silently, as the setup program runs this
+      package, Restart Manager closes them; force (1) ends any that do not
+      answer. Run directly with a UI, Windows may warn of a reboot instead,
+      which is why people use the setup program. CloseTrayApp and
+      StopServices then make sure nothing holds a file when it is replaced or
+      removed.
+    -->
+    <Property Id="MSIRMSHUTDOWN" Value="1" />
+
+    <!-- D8: the development registration and the package exclude each other. -->
+    <Property Id="DESKHOP_SERVICE_IMAGE">
+      <RegistrySearch Root="HKLM" Key="SYSTEM\CurrentControlSet\Services\DeskHop" Name="ImagePath" Type="raw" Bitness="always64" />
+    </Property>
+    <Launch Condition="Installed OR WIX_UPGRADE_DETECTED OR NOT DESKHOP_SERVICE_IMAGE"
+            Message="DeskHop's development service is registered. Run tools\dev\service.ps1 uninstall from an elevated PowerShell first." />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="DeskHop" />
+    </StandardDirectory>
+
+    <Feature Id="DeskHop" Title="DeskHop" Level="1">
+      <ComponentGroupRef Id="Programs" />
+      <ComponentGroupRef Id="Machine" />
+    </Feature>
+
+    <!-- D3, D4, D6: closing the tray app, removing the data folder, WebView2. -->
+    <CustomActionRef Id="RemoveData" />
+
+    <!-- D7: progress, then a finish page offering to start the tray app. -->
+    <UIRef Id="DeskHopUI" />
+  </Package>
+
+  <Fragment>
+    <ComponentGroup Id="Programs" Directory="INSTALLFOLDER">
+      <!-- D3: the service, its failure actions, and its firewall rules. -->
+      <Component Id="Service">
+        <File Id="ServiceExe" Source="$(BinDir)\deskhop-service.exe" KeyPath="yes">
+          <fw:FirewallException Id="FirewallQuic" Name="DeskHop (UDP 47391)" Protocol="udp" Port="47391" Scope="any" Profile="all" Description="DeskHop's encrypted link to the PCs it is paired with." />
+          <fw:FirewallException Id="FirewallMdns" Name="DeskHop (mDNS)" Protocol="udp" Port="5353" Scope="any" Profile="all" Description="DeskHop finding the PCs it is paired with on this network." />
+        </File>
+        <ServiceInstall Id="Service"
+                        Name="DeskHop"
+                        DisplayName="DeskHop"
+                        Description="Shares one keyboard and mouse across your PCs."
+                        Type="ownProcess"
+                        Start="auto"
+                        Account="LocalSystem"
+                        ErrorControl="normal"
+                        Vital="yes">
+          <util:ServiceConfig FirstFailureActionType="restart"
+                              SecondFailureActionType="restart"
+                              ThirdFailureActionType="restart"
+                              RestartServiceDelayInSeconds="5"
+                              ResetPeriodInDays="1" />
+        </ServiceInstall>
+        <ServiceControl Id="Service" Name="DeskHop" Start="install" Stop="both" Remove="uninstall" Wait="yes" />
+      </Component>
+      <Component Id="Agent">
+        <File Id="AgentExe" Source="$(BinDir)\deskhop-agent.exe" KeyPath="yes" />
+      </Component>
+      <!-- D3: the tray app, with a Start menu shortcut for all users. -->
+      <Component Id="TrayApp">
+        <File Id="DeskHopExe" Source="$(BinDir)\DeskHop.exe" KeyPath="yes">
+          <Shortcut Id="DeskHop" Directory="ProgramMenuFolder" Name="DeskHop" Description="Share one keyboard and mouse across your PCs." WorkingDirectory="INSTALLFOLDER" Advertise="no" />
+        </File>
+      </Component>
+    </ComponentGroup>
+  </Fragment>
+
+  <Fragment>
+    <ComponentGroup Id="Machine">
+      <!-- D3, D8: where DeskHop is installed, for the development script. -->
+      <Component Id="Markers" Directory="INSTALLFOLDER">
+        <RegistryValue Root="HKLM" Key="SOFTWARE\DeskHop" Name="InstallFolder" Type="string" Value="[INSTALLFOLDER]" KeyPath="yes" />
+        <RemoveRegistryKey Root="HKLM" Key="SOFTWARE\DeskHop" Action="removeOnUninstall" />      </Component>
+
+      <!--
+        D5: set the secure attention policy only if it is unset, and remove it
+        only if this package set it. SasSet marks that, so an upgrade keeps it.
+      -->
+      <Component Id="SasPolicy" Directory="INSTALLFOLDER" Condition="NOT SAS_EXISTING OR SAS_OURS">
+        <RegistryValue Root="HKLM" Key="SOFTWARE\DeskHop" Name="SasSet" Type="integer" Value="1" KeyPath="yes" />
+        <RegistryValue Root="HKLM" Key="SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" Name="SoftwareSASGeneration" Type="integer" Value="1" />
+      </Component>
+    </ComponentGroup>
+
+    <Property Id="SAS_EXISTING">
+      <RegistrySearch Root="HKLM" Key="SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" Name="SoftwareSASGeneration" Type="raw" Bitness="always64" />
+    </Property>
+    <Property Id="SAS_OURS">
+      <RegistrySearch Root="HKLM" Key="SOFTWARE\DeskHop" Name="SasSet" Type="raw" Bitness="always64" />
+    </Property>
+  </Fragment>
+
+  <Fragment>
+    <!-- D3: the tray app hides on WM_CLOSE, so it is ended instead. Its state lives in the service. -->
+    <util:CloseApplication Id="CloseTrayApp" Target="DeskHop.exe" CloseMessage="no" TerminateProcess="1" Timeout="2" RebootPrompt="no" />
+
+    <!--
+      D4: remove the SYSTEM-only data folder on uninstall, but not on an
+      upgrade. The service's own check refuses links and untrusted owners.
+    -->
+    <SetProperty Id="RemoveData" Value="&quot;[#ServiceExe]&quot; --remove-data" Before="RemoveData" Sequence="execute" />
+    <CustomAction Id="RemoveData" BinaryRef="Wix4UtilCA_$(sys.BUILDARCHSHORT)" DllEntry="WixQuietExec" Execute="deferred" Impersonate="no" Return="ignore" />
+
+    <!-- D6: the WebView2 runtime the tray app needs, only when missing; a failure is logged, not fatal. -->
+    <Property Id="WEBVIEW2">
+      <RegistrySearch Root="HKLM" Key="SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}" Name="pv" Type="raw" Bitness="always64" />
+    </Property>
+    <Property Id="WEBVIEW2_NATIVE">
+      <RegistrySearch Root="HKLM" Key="SOFTWARE\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}" Name="pv" Type="raw" Bitness="always64" />
+    </Property>
+    <Binary Id="WebView2Setup" SourceFile="$(WebView2Setup)" />
+    <CustomAction Id="InstallWebView2" BinaryRef="WebView2Setup" ExeCommand="/silent /install" Execute="deferred" Impersonate="no" Return="ignore" />
+
+    <InstallExecuteSequence>
+      <!-- Before any file is removed or replaced: WiX's default slot is after RemoveFiles. -->
+      <Custom Action="override Wix4CloseApplications_$(sys.BUILDARCHSHORT)" Before="StopServices" Condition="VersionNT > 400" />
+      <Custom Action="RemoveData" After="StopServices" Condition='REMOVE~="ALL" AND NOT UPGRADINGPRODUCTCODE' />
+      <Custom Action="InstallWebView2" Before="InstallFinalize" Condition="NOT WEBVIEW2 AND NOT WEBVIEW2_NATIVE AND NOT REMOVE" />
+    </InstallExecuteSequence>
+  </Fragment>
+</Wix>

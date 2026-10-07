@@ -1,0 +1,31 @@
+<!--
+  DeskHop's setup program (add-installer design D11): a Burn bundle that runs
+  the MSI silently behind its own progress window. Build it with
+  installer\build.ps1, which builds the MSI first and passes:
+
+    ProductVersion  the workspace version, such as 0.1.0
+    MsiPath         the MSI to chain
+    Platform        x64 or ARM64
+-->
+<Project Sdk="WixToolset.Sdk/5.0.2">
+  <PropertyGroup>
+    <OutputType>Bundle</OutputType>
+    <ProductVersion Condition="'$(ProductVersion)' == ''">0.0.0</ProductVersion>
+    <ArchName Condition="'$(Platform)' == 'ARM64'">arm64</ArchName>
+    <ArchName Condition="'$(ArchName)' == ''">x64</ArchName>
+    <OutputName>DeskHop-Setup-$(ProductVersion)-$(ArchName)$(OutputSuffix)</OutputName>
+    <OutputPath>out\</OutputPath>
+    <DefineConstants>ProductVersion=$(ProductVersion);MsiPath=$(MsiPath);Icon=$(MSBuildThisFileDirectory)..\apps\desktop\src-tauri\icons\icon.ico</DefineConstants>
+  </PropertyGroup>
+  <PropertyGroup>
+    <!-- Only the bundle's own source: Package.wxs and UI.wxs belong to DeskHop.wixproj. -->
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="Bundle.wxs" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="WixToolset.Bal.wixext" Version="5.0.2" />
+    <PackageReference Include="WixToolset.Util.wixext" Version="5.0.2" />
+  </ItemGroup>
+</Project>
