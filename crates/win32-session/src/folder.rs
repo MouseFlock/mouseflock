@@ -77,6 +77,49 @@ pub fn secure_folder(path: &Path) -> io::Result<Prepared> {
     ))
 }
 
+/// What [`remove_secure_folder`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Removal {
+    /// A trusted folder, removed with everything in it.
+    Removed,
+    /// Nothing was at `path`.
+    Absent,
+    /// Something else was at `path`, left untouched, and why.
+    Refused(String),
+}
+
+/// Removes the data folder `path` and everything in it, but only if it is a
+/// real folder owned by SYSTEM or Administrators, the folders
+/// [`secure_folder`] keeps (add-installer design D4). A junction, symbolic
+/// link or file at `path`, or a folder with another owner, is left
+/// untouched, and so is anything it points to.
+///
+/// Links inside the folder are removed, never followed: `remove_dir_all`
+/// opens each entry without following reparse points. Only SYSTEM and
+/// Administrators can replace a folder they own, so nobody else can swap it
+/// for a link between the check and the removal.
+pub fn remove_secure_folder(path: &Path) -> io::Result<Removal> {
+    let meta = match std::fs::symlink_metadata(path) {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Removal::Absent),
+        Err(e) => return Err(e),
+    };
+    if meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0 {
+        return Ok(Removal::Refused("it is a link or junction".into()));
+    }
+    if !meta.is_dir() {
+        return Ok(Removal::Refused("it is not a folder".into()));
+    }
+    let owner = owner(path)?;
+    if !is_trusted_owner(&owner) {
+        return Ok(Removal::Refused(format!(
+            "it is owned by {owner}, not SYSTEM or Administrators"
+        )));
+    }
+    std::fs::remove_dir_all(path)?;
+    Ok(Removal::Removed)
+}
+
 /// `<name>.untrusted-<unix seconds>` next to `path`.
 fn aside(path: &Path) -> PathBuf {
     let secs = SystemTime::now()
@@ -242,6 +285,78 @@ mod tests {
         let name = moved.file_name().unwrap().to_string_lossy().into_owned();
         assert!(name.starts_with("DeskHop.untrusted-"), "{name}");
         assert_eq!(moved.parent(), Some(Path::new(r"C:\ProgramData")));
+    }
+
+    fn temp(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("deskhop-remove-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    #[test]
+    fn removing_an_absent_folder() {
+        let dir = temp("absent");
+        assert_eq!(remove_secure_folder(&dir).unwrap(), Removal::Absent);
+    }
+
+    #[test]
+    fn a_junction_is_refused_and_its_target_kept() {
+        let base = temp("junction");
+        let target = base.join("target");
+        let link = base.join("DeskHop");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("keep.txt"), b"keep").unwrap();
+        // Junctions need no privilege, unlike symbolic links.
+        let made = std::process::Command::new("cmd")
+            .args(["/c", "mklink", "/J"])
+            .arg(&link)
+            .arg(&target)
+            .output()
+            .unwrap();
+        assert!(made.status.success(), "{made:?}");
+
+        let removal = remove_secure_folder(&link).unwrap();
+        assert!(matches!(removal, Removal::Refused(_)), "{removal:?}");
+        assert!(
+            std::fs::symlink_metadata(&link).is_ok(),
+            "the junction was removed"
+        );
+        assert_eq!(std::fs::read(target.join("keep.txt")).unwrap(), b"keep");
+
+        std::fs::remove_dir(&link).unwrap();
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn a_file_is_refused() {
+        let base = temp("file");
+        std::fs::create_dir_all(&base).unwrap();
+        let file = base.join("DeskHop");
+        std::fs::write(&file, b"x").unwrap();
+        let removal = remove_secure_folder(&file).unwrap();
+        assert!(matches!(removal, Removal::Refused(_)), "{removal:?}");
+        assert!(file.exists());
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn a_folder_is_removed_only_with_a_trusted_owner() {
+        let dir = temp("owner");
+        std::fs::create_dir_all(dir.join("inner")).unwrap();
+        std::fs::write(dir.join("inner").join("f"), b"x").unwrap();
+        // A normal user owns what it creates, so it is refused; an elevated
+        // administrator (CI) creates folders owned by Administrators, which
+        // are trusted, so it is removed.
+        let trusted = is_trusted_owner(&owner(&dir).unwrap());
+        let removal = remove_secure_folder(&dir).unwrap();
+        if trusted {
+            assert_eq!(removal, Removal::Removed);
+            assert!(!dir.exists());
+        } else {
+            assert!(matches!(removal, Removal::Refused(_)), "{removal:?}");
+            assert!(dir.join("inner").join("f").exists());
+            std::fs::remove_dir_all(&dir).unwrap();
+        }
     }
 
     #[test]

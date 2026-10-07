@@ -1,6 +1,6 @@
 # DeskHop threat model
 
-*Status: covers the wire, pairing, desk membership, the LAN transport, forwarded input, the agent → service and UI → service pipes, the UI app, the clipboard, the service's data folder, console mode, secure attention and the secure desktop. Elevated windows on the user's desktop are a known gap, left to a later change.*
+*Status: covers the wire, pairing, desk membership, the LAN transport, forwarded input, the agent → service and UI → service pipes, the UI app, the clipboard, the service's data folder, console mode, secure attention, the secure desktop, and installing and uninstalling. Elevated windows on the user's desktop are a known gap, left to a later change.*
 
 DeskHop injects keystrokes received over the network, and its service runs as SYSTEM. This document records what it defends against and where.
 
@@ -15,7 +15,7 @@ DeskHop injects keystrokes received over the network, and its service runs as SY
 
 | Boundary | Less trusted side | Notes |
 |---|---|---|
-| LAN → service | Any host on the network | Unauthenticated packets reach `proto` decoding as SYSTEM. |
+| LAN → service | Any host on the network | Unauthenticated packets reach `proto` decoding as SYSTEM. The installed firewall rules admit them on every network type, public included; see "Install and uninstall". |
 | Named pipe → service | Agents, UI | The service validates everything it receives (ADR 0002). See "Agent → service" and "UI → service". |
 | Winlogon agent → service | Winlogon agent | Runs as SYSTEM, with privileges removed, on the secure desktop. The service checks it like the session agent. See "Secure desktop (winlogon agent)". |
 
@@ -201,3 +201,37 @@ Residual risks:
 - A compromised member that controls a machine while a UAC consent prompt is up can approve it. Removing the member ends that.
 - A session switch ends the winlogon agent and launches a new one in the new console session, within a second or two. Until then, input cannot reach that session's secure desktop.
 - Elevated windows on the user's desktop run at high integrity. There the medium-integrity session agent cannot inject, and its hooks may not see input. This is unchanged by this change and left to a later one.
+
+### Install and uninstall
+
+The package (`installer/`) runs as SYSTEM through Windows Installer and changes the machine on the user's one consent. People run it through the setup program, a WiX Burn bundle that runs the package silently. The bundle is a second unsigned executable, and it is elevated once by Windows' consent prompt. Specified in `openspec/specs/installer/spec.md`.
+
+- **Where the programs live.**
+  - The service, the agent and the tray app are installed in `C:\Program Files\DeskHop`, which inherits Program Files' ACL: only administrators and SYSTEM can write there.
+  - The service runs as SYSTEM from that folder and launches the winlogon agent as SYSTEM from it too, so a folder users could write would hand them SYSTEM.
+  - The package sets no permissions of its own.
+  - The development script copies its build to `Program Files\DeskHop Dev` for the same reason.
+- **Firewall on every network type.**
+  - The rules admit UDP 47391 and 5353 to `deskhop-service.exe` only, on domain, private and public networks.
+  - Windows marks a newly joined network public, home Wi-Fi included, and leaving public out would make DeskHop silently fail there.
+  - On a public network, any host on it can therefore reach what "Hostile bytes on the wire" and "Strangers and spoofing on the LAN" already defend: strict, bounded, fuzzed decoding, a QUIC handshake pinned to member keys, and pairing that opens only when the user asks.
+  - No other program or port is opened.
+- **Secure attention policy.**
+  - The package sets `SoftwareSASGeneration` to 1 only when it is unset, so a controlling member's Ctrl+Alt+End can show the Ctrl-Alt-Del screen (see "Secure attention").
+  - A value an administrator or Group Policy set is never changed.
+  - Uninstall removes the value only if the package set it.
+- **The WebView2 bootstrapper** runs as SYSTEM during install, only when the runtime is missing.
+  - The build refuses any copy that is not validly Authenticode-signed by Microsoft Corporation.
+  - The bootstrapper itself downloads the runtime from Microsoft.
+  - A failure leaves the install successful, without the tray app's runtime.
+- **Uninstall removes the identity.**
+  - Removing DeskHop deletes `C:\ProgramData\DeskHop`, with the identity key, so no private key outlives the install.
+  - Any user can create folders in `C:\ProgramData`, and until the service first starts, `DeskHop` there could be a user's junction to another folder. So the removal step, which runs as SYSTEM, is the service's own `--remove-data`.
+  - `--remove-data` removes the folder only if it is a real folder owned by SYSTEM or Administrators, as `secure_folder` would keep. A link, a file, or another owner's folder is left untouched, along with what it points to.
+  - The removal never follows a link inside the folder.
+  - An upgrade keeps the folder.
+- **The tray app on upgrade and uninstall.** The package ends running copies of `DeskHop.exe` before replacing or removing files. Its state lives in the service, so nothing is lost. Agents end when the service stops.
+
+Residual risks:
+- The packages are not code-signed yet. A user cannot tell a genuine package from a tampered one except by comparing its hash with the CI artifact's. Signing comes with a release pipeline.
+- Other users' `Run` entries and `%APPDATA%` markers remain after uninstall. Windows ignores a `Run` entry whose program is missing.

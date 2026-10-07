@@ -71,6 +71,8 @@ cargo clippy --workspace -- -D warnings
 cargo archcheck                        # dependency and unsafe rules
 cargo build -p deskhop-agent; cargo run -p deskhop-service -- --console   # dev loop: pair, cross, type `help`
 tools\dev\service.ps1 install|start|status|log|stop|uninstall             # registered service; elevated shell, run by the user
+installer\build.ps1 -Arch x64|arm64                                        # the MSI and the setup program, in installer\out
+installer\test.ps1 -Msi <msi> -UpgradeMsi <msi> -Setup <exe>               # install, upgrade, uninstall; elevated shell, run by the user
 cargo check -p transport -p win32-input -p win32-session -p win32-shell -p deskhop-agent -p deskhop-service -p deskhop-desktop --target aarch64-pc-windows-msvc
 cd apps/desktop && npm run tauri dev    # dev build trusts a console-mode service in this session
 cd apps/desktop && npm test             # React tests

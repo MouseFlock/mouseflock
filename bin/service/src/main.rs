@@ -8,6 +8,8 @@
 //! - With no arguments it runs under the Service Control Manager ([`scm`]).
 //! - `--console [--data <dir>] [--port <n>]` runs it in a terminal as the
 //!   current user, with its own data folder and typed commands ([`console`]).
+//! - `--remove-data` removes the service's data folder and exits. The
+//!   installer runs it as SYSTEM on uninstall (add-installer design D4).
 
 #![forbid(unsafe_code)]
 
@@ -32,12 +34,14 @@ use host::{Clock, HostCommand, HostConfig, Report, Sas};
 use log::Log;
 use supervisor::SupervisorCommand;
 
-const USAGE: &str = "usage: deskhop-service [--console [--data <dir>] [--port <n>]]";
+const USAGE: &str =
+    "usage: deskhop-service [--console [--data <dir>] [--port <n>]] | --remove-data";
 
 #[derive(Debug, PartialEq, Eq)]
 enum Mode {
     Service,
     Console { data: Option<PathBuf>, port: u16 },
+    RemoveData,
 }
 
 fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Mode, String> {
@@ -45,6 +49,14 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Mode, String> {
     let Some(first) = args.next() else {
         return Ok(Mode::Service);
     };
+    if first == "--remove-data" {
+        return match args.next() {
+            None => Ok(Mode::RemoveData),
+            Some(extra) => Err(format!(
+                "`--remove-data` takes nothing after it, not `{extra}`"
+            )),
+        };
+    }
     if first != "--console" {
         return Err(format!("unknown argument `{first}`"));
     }
@@ -228,10 +240,29 @@ fn console_main(data: Option<PathBuf>, port: u16) -> ExitCode {
     })
 }
 
+/// Removes the service's data folder if it is the folder the service keeps
+/// (add-installer design D4). Always exits 0, so a leftover never blocks an
+/// uninstall; the installer's log keeps what was printed.
+fn remove_data() -> ExitCode {
+    let dir = store::service_dir();
+    match win32_session::remove_secure_folder(&dir) {
+        Ok(win32_session::Removal::Removed) => println!("removed {}", dir.display()),
+        Ok(win32_session::Removal::Absent) => {
+            println!("nothing to remove: {} does not exist", dir.display())
+        }
+        Ok(win32_session::Removal::Refused(why)) => {
+            println!("left {} in place: {why}", dir.display())
+        }
+        Err(e) => println!("could not remove {}: {e}", dir.display()),
+    }
+    ExitCode::SUCCESS
+}
+
 fn main() -> ExitCode {
     match parse_args(std::env::args().skip(1)) {
         Ok(Mode::Service) => scm::run(),
         Ok(Mode::Console { data, port }) => console_main(data, port),
+        Ok(Mode::RemoveData) => remove_data(),
         Err(e) => {
             eprintln!("deskhop-service: {e}\n{USAGE}");
             ExitCode::from(2)
@@ -264,8 +295,12 @@ mod tests {
                 port: 5000
             })
         );
+        assert_eq!(parse_args(args("--remove-data")), Ok(Mode::RemoveData));
         for bad in [
             "--service",
+            "--remove-data --console",
+            "--remove-data x",
+            "--console --remove-data",
             "--console --port",
             "--console --port x",
             "--console --data a --data b",

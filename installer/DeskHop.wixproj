@@ -1,0 +1,41 @@
+<!--
+  DeskHop's Windows Installer package (add-installer design D1). Build it with
+  installer\build.ps1, which builds the programs first and passes:
+
+    ProductVersion  the workspace version, such as 0.1.0
+    BinDir          the folder holding the three release programs
+    WebView2Setup   the checked WebView2 evergreen bootstrapper
+    Platform        x64 or ARM64
+-->
+<Project Sdk="WixToolset.Sdk/5.0.2">
+  <PropertyGroup>
+    <ProductVersion Condition="'$(ProductVersion)' == ''">0.0.0</ProductVersion>
+    <ArchName Condition="'$(Platform)' == 'ARM64'">arm64</ArchName>
+    <ArchName Condition="'$(ArchName)' == ''">x64</ArchName>
+    <OutputName>DeskHop-$(ProductVersion)-$(ArchName)$(OutputSuffix)</OutputName>
+    <OutputPath>out\</OutputPath>
+    <!--
+      ICE61 warns that a same-version package replaces the installed one, which
+      AllowSameVersionUpgrades asks for. ICE43 and ICE57 treat ProgramMenuFolder
+      as per-user; this package is per-machine (ALLUSERS=1), where it is the
+      all-users Start menu, so the shortcut's file key path is right.
+    -->
+    <SuppressIces>ICE43;ICE57;ICE61</SuppressIces>
+    <!-- Every build is a new product, so any build upgrades the one installed (D3). -->
+    <ProductCode Condition="'$(ProductCode)' == ''">$([System.Guid]::NewGuid().ToString('B').ToUpperInvariant())</ProductCode>
+    <DefineConstants>ProductVersion=$(ProductVersion);ProductCode=$(ProductCode);BinDir=$(BinDir);WebView2Setup=$(WebView2Setup);Icon=$(MSBuildThisFileDirectory)..\apps\desktop\src-tauri\icons\icon.ico</DefineConstants>
+  </PropertyGroup>
+  <PropertyGroup>
+    <!-- Named below: Bundle.wxs in this folder belongs to DeskHopSetup.wixproj. -->
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="Package.wxs" />
+    <Compile Include="UI.wxs" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="WixToolset.Util.wixext" Version="5.0.2" />
+    <PackageReference Include="WixToolset.Firewall.wixext" Version="5.0.2" />
+    <PackageReference Include="WixToolset.UI.wixext" Version="5.0.2" />
+  </ItemGroup>
+</Project>
