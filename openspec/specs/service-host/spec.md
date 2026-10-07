@@ -58,7 +58,7 @@ Every stored file SHALL be replaced atomically, so a crash or power loss leaves 
 - **THEN** at the next start the trust store holds either the previous membership or the new one
 
 ### Requirement: The engine drives the agent and peers
-The service SHALL feed the engine with the agent's input in service-clock time, its screen reports, peer messages, and peers coming up or going down. It SHALL carry out every decision: capture mode, injection and warp to the agent, messages to peers, and layouts to storage. A decision for the agent while none is linked SHALL be dropped.
+The service SHALL feed the engine with the active agent's input in service-clock time, its screen reports, peer messages, and peers coming up or going down. It SHALL carry out every decision: capture mode to every linked agent, injection and warp to the active agent, messages to peers, and layouts to storage. The active agent is the one on the input desktop (`secure-desktop`). A decision for an agent while none is linked SHALL be dropped.
 
 #### Scenario: The cursor crosses
 - **WHEN** A and B are paired and up, A learned that B is to its right, and the user pushes A's cursor through A's right edge
@@ -124,11 +124,15 @@ In console mode the service SHALL print the pairing code when pairing opens, and
 - **THEN** A's console prints that B was learned to the right and that `undo` takes it back within 10 seconds
 
 ### Requirement: Orderly stop
-On a stop request (the Service Control Manager stopping the service, system shutdown, `quit`, or Ctrl+C in console mode), the service SHALL say goodbye to every peer, end the agent link, and finish pending writes before exiting. Ending the link SHALL make the agent stop withholding input.
+On a stop request (the Service Control Manager stopping the service, system shutdown, `quit`, or Ctrl+C in console mode), the service SHALL say goodbye to every peer, end every agent link, and finish pending writes before exiting. Ending the links SHALL make every agent stop withholding input.
 
 #### Scenario: Stopped while forwarding
 - **WHEN** A's input has focus on B and A's service is stopped
-- **THEN** B reports A down as having said goodbye and releases what A held, A's agent exits, and A's keyboard and mouse work locally
+- **THEN** B reports A down as having said goodbye and releases what A held, A's agents exit, and A's keyboard and mouse work locally
+
+#### Scenario: Stopped at the lock screen
+- **WHEN** A is locked, its input has focus on B, and A's service is stopped
+- **THEN** A's winlogon agent stops withholding and exits, and the user can type A's password at A's own keyboard
 
 ### Requirement: Logs
 In service mode the service SHALL log to a file in its data folder that the Administrators group can read. When that file reaches 1 MB, it SHALL be renamed to keep exactly one previous file, and a new file SHALL be started. In console mode it SHALL log to the terminal. Logs SHALL NOT contain pairing codes, keys or input contents.
