@@ -1,22 +1,24 @@
 //! `deskhop-agent.exe`: input and clipboard on one desktop.
 //!
-//! `--session --pipe <name>` runs on the user desktop and talks to the service
-//! over the named pipe it is given (see `session`); `--winlogon` will run on
-//! the secure desktop for UAC prompts and the lock screen. Spawned by the
-//! service only. Never touches the network.
+//! `--session --pipe <name>` runs on the user desktop, and
+//! `--winlogon --pipe <name>` on the secure desktop for UAC prompts, the
+//! lock screen and the logon screen. Each talks to the service over the
+//! named pipe it is given (see `link`). Spawned by the service only. Never
+//! touches the network.
 //!
 //! `--trace [--withhold mouse|all <seconds>]` is a developer diagnostic: it
-//! prints every captured event and screen report to the console. With
-//! `--withhold` it withholds physical input for 1 to 10 seconds and then
-//! passes everything again.
+//! prints every captured event, screen report and input desktop change to
+//! the console. With `--withhold` it withholds physical input for 1 to 10
+//! seconds and then passes everything again.
 
 #![forbid(unsafe_code)]
 
-mod session;
+mod link;
 
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
+use ipc::link::AgentRole;
 use model::{CaptureMode, InputEvent, Origin, Screen};
 use win32_input::{Captured, MonitorDetail};
 
@@ -26,10 +28,10 @@ const MAX_WITHHOLD_SECS: u64 = 10;
 
 #[derive(Debug, PartialEq, Eq)]
 enum Mode {
-    Session {
+    Link {
+        role: AgentRole,
         pipe: String,
     },
-    Winlogon,
     Trace {
         withhold: Option<(CaptureMode, u64)>,
     },
@@ -39,10 +41,17 @@ fn parse_mode(args: impl Iterator<Item = String>) -> Option<Mode> {
     let args: Vec<String> = args.collect();
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     match args.as_slice() {
-        ["--session", "--pipe", pipe] if !pipe.is_empty() => Some(Mode::Session {
-            pipe: (*pipe).to_owned(),
-        }),
-        ["--winlogon"] => Some(Mode::Winlogon),
+        [kind, "--pipe", pipe] if !pipe.is_empty() => {
+            let role = match *kind {
+                "--session" => AgentRole::Session,
+                "--winlogon" => AgentRole::Winlogon,
+                _ => return None,
+            };
+            Some(Mode::Link {
+                role,
+                pipe: (*pipe).to_owned(),
+            })
+        }
         ["--trace"] => Some(Mode::Trace { withhold: None }),
         ["--trace", "--withhold", what, secs] => {
             let mode = match *what {
@@ -63,12 +72,11 @@ fn parse_mode(args: impl Iterator<Item = String>) -> Option<Mode> {
 
 fn main() -> ExitCode {
     match parse_mode(std::env::args().skip(1)) {
-        Some(Mode::Session { pipe }) => session::run(&pipe),
-        Some(Mode::Winlogon) => ExitCode::SUCCESS,
+        Some(Mode::Link { role, pipe }) => link::run(&pipe, role),
         Some(Mode::Trace { withhold }) => trace(withhold),
         None => {
             eprintln!(
-                "usage: deskhop-agent.exe --session --pipe <name> | --winlogon\n       \
+                "usage: deskhop-agent.exe --session|--winlogon --pipe <name>\n       \
                  deskhop-agent.exe --trace [--withhold mouse|all <1..{MAX_WITHHOLD_SECS}>]"
             );
             ExitCode::from(2)
@@ -78,7 +86,10 @@ fn main() -> ExitCode {
 
 /// Prints captured events until the process is ended (Ctrl+C).
 fn trace(withhold: Option<(CaptureMode, u64)>) -> ExitCode {
-    let (capture, rx) = match win32_input::start() {
+    let options = win32_input::Options {
+        report_input_desktop: true,
+    };
+    let (capture, rx) = match win32_input::start(options) {
         Ok(v) => v,
         Err(e) => {
             eprintln!("deskhop-agent: {e}");
@@ -130,6 +141,10 @@ fn describe(c: &Captured) -> String {
             format!("{:>10} {what} {origin}", at.0)
         }
         Captured::Screen(screen, details) => describe_screen(screen, details),
+        Captured::InputDesktop(true) => "input desktop: this one".to_owned(),
+        Captured::InputDesktop(false) => {
+            "input desktop: another one, or one this process may not open".to_owned()
+        }
     }
 }
 
@@ -168,11 +183,18 @@ mod tests {
     fn valid_forms() {
         assert_eq!(
             parse(&["--session", "--pipe", r"\\.\pipe\x"]),
-            Some(Mode::Session {
+            Some(Mode::Link {
+                role: AgentRole::Session,
                 pipe: r"\\.\pipe\x".into()
             })
         );
-        assert_eq!(parse(&["--winlogon"]), Some(Mode::Winlogon));
+        assert_eq!(
+            parse(&["--winlogon", "--pipe", r"\\.\pipe\y"]),
+            Some(Mode::Link {
+                role: AgentRole::Winlogon,
+                pipe: r"\\.\pipe\y".into()
+            })
+        );
         assert_eq!(parse(&["--trace"]), Some(Mode::Trace { withhold: None }));
         assert_eq!(
             parse(&["--trace", "--withhold", "mouse", "5"]),
@@ -205,5 +227,9 @@ mod tests {
         assert_eq!(parse(&["--session"]), None);
         assert_eq!(parse(&["--session", "--pipe"]), None);
         assert_eq!(parse(&["--session", "--pipe", ""]), None);
+        assert_eq!(parse(&["--winlogon"]), None);
+        assert_eq!(parse(&["--winlogon", "--pipe"]), None);
+        assert_eq!(parse(&["--winlogon", "--pipe", ""]), None);
+        assert_eq!(parse(&["--trace", "--pipe", r"\\.\pipe\x"]), None);
     }
 }

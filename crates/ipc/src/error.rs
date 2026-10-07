@@ -37,6 +37,9 @@ pub enum ProtocolError {
     /// A clipboard message that breaks a run: a chunk outside a run, too
     /// many bytes for it, or another clipboard message cutting it short.
     ClipboardRun { ty: u16 },
+    /// An agent message its role may not send: clipboard from the winlogon
+    /// agent, or `InputDesktop` from the session agent.
+    WrongRole { ty: u16, role: u8 },
 }
 
 impl fmt::Display for ProtocolError {
@@ -72,6 +75,9 @@ impl fmt::Display for ProtocolError {
             }
             Self::ClipboardRun { ty } => {
                 write!(f, "message type {ty:#06x} breaks a clipboard run")
+            }
+            Self::WrongRole { ty, role } => {
+                write!(f, "message type {ty:#06x} may not come from role {role}")
             }
         }
     }

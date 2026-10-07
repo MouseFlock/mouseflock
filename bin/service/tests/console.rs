@@ -136,8 +136,8 @@ impl Console {
 
     /// Waits for the next agent to be launched and linked; returns its PID.
     fn linked_agent(&mut self) -> u32 {
-        let line = self.logged("launched agent", WAIT);
-        self.printed("agent linked", WAIT);
+        let line = self.logged("launched session agent", WAIT);
+        self.printed("session agent linked", WAIT);
         launched_pid(&line).unwrap()
     }
 
@@ -153,9 +153,9 @@ impl Console {
     }
 }
 
-/// The PID in a "launched agent <pid> in …" log line.
+/// The PID in a "launched session agent <pid> in …" log line.
 fn launched_pid(line: &str) -> Option<u32> {
-    let rest = line.split("launched agent ").nth(1)?;
+    let rest = line.split("launched session agent ").nth(1)?;
     rest.split_whitespace().next()?.parse().ok()
 }
 
@@ -186,7 +186,7 @@ fn quit_ends_service_and_agent() {
     let mut console = Console::start("quit");
     let pid = console.linked_agent();
     console.type_line("quit");
-    console.logged(&format!("agent {pid} exited with Some(0)"), WAIT);
+    console.logged(&format!("session agent {pid} exited with Some(0)"), WAIT);
     let status = console.exits_within(WAIT).expect("service kept running");
     assert_eq!(status.code(), Some(0));
     assert!(!is_running(pid));

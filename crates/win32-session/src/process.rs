@@ -96,14 +96,39 @@ fn quote(arg: &str, out: &mut String) {
     out.push('"');
 }
 
-/// Launches `exe` with `args` as `token`'s user, on the interactive desktop
-/// of the token's session, without a window and with that user's
-/// environment. No handles are inherited.
-pub fn launch_as(token: &Token, exe: &Path, args: &[&str], dir: &Path) -> io::Result<Process> {
+/// A desktop of the interactive window station, `winsta0`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Desktop {
+    /// The user's desktop.
+    Default,
+    /// The secure desktop: UAC prompts, the lock and logon screens.
+    Winlogon,
+}
+
+impl Desktop {
+    /// The name `STARTUPINFOW::lpDesktop` takes.
+    pub fn path(self) -> &'static str {
+        match self {
+            Self::Default => r"winsta0\default",
+            Self::Winlogon => r"winsta0\Winlogon",
+        }
+    }
+}
+
+/// Launches `exe` with `args` as `token`'s user, on `desktop` in the
+/// token's session, without a window and with that user's environment. No
+/// handles are inherited.
+pub fn launch_as(
+    token: &Token,
+    exe: &Path,
+    args: &[&str],
+    dir: &Path,
+    desktop: Desktop,
+) -> io::Result<Process> {
     let app = wide(exe);
     let mut line = wide(command_line(exe, args));
     let cwd = wide(dir);
-    let mut desktop = wide(r"winsta0\default");
+    let mut desktop = wide(desktop.path());
 
     let mut env = std::ptr::null_mut();
     // SAFETY: `env` is a valid out-pointer; the block is destroyed below.
@@ -185,6 +210,7 @@ mod tests {
             Path::new(r"C:\Windows\System32\whoami.exe"),
             &[],
             Path::new(r"C:\"),
+            Desktop::Default,
         ) {
             assert_eq!(p.wait().unwrap(), 0);
         }

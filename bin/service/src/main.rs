@@ -1,8 +1,9 @@
 //! `deskhop-service.exe`: Windows service, SYSTEM, session 0.
 //!
 //! Owns transport, pairing keys, and the engine. Launches the session agent
-//! into the console session; every launch goes through [`launch::agent`].
-//! Never touches input: the agent captures and injects, over the `ipc` link.
+//! and the winlogon agent into the console session; every launch goes
+//! through [`launch::agent`]. Never touches input: the agents capture and
+//! inject, over their `ipc` links.
 //!
 //! - With no arguments it runs under the Service Control Manager ([`scm`]).
 //! - `--console [--data <dir>] [--port <n>]` runs it in a terminal as the
@@ -24,6 +25,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
 
+use ipc::link::AgentRole;
 use tokio::sync::{mpsc, oneshot};
 
 use host::{Clock, HostCommand, HostConfig, Report, Sas};
@@ -60,13 +62,26 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Mode, String> {
     Ok(Mode::Console { data, port })
 }
 
-/// A started service: the host and the supervisor.
+/// A started service: the host, and a supervisor for each agent kind.
 pub struct Service {
     pub host: mpsc::UnboundedSender<HostCommand>,
-    pub supervisor: mpsc::UnboundedSender<SupervisorCommand>,
+    supervisors: Vec<Supervisor>,
     host_task: tokio::task::JoinHandle<()>,
-    supervisor_task: tokio::task::JoinHandle<()>,
     ui_task: tokio::task::JoinHandle<()>,
+}
+
+struct Supervisor {
+    commands: mpsc::UnboundedSender<SupervisorCommand>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl Service {
+    /// Sessions changed: every supervisor finds its target again.
+    pub fn sessions_changed(&self) {
+        for s in &self.supervisors {
+            let _ = s.commands.send(SupervisorCommand::SessionsChanged);
+        }
+    }
 }
 
 /// Prepares the data folder, loads what is stored, and starts the host,
@@ -89,7 +104,6 @@ pub async fn start(
     let clock = Clock::new();
     let (links_tx, links) = mpsc::unbounded_channel();
     let (host, host_rx) = mpsc::unbounded_channel();
-    let (supervisor, supervisor_rx) = mpsc::unbounded_channel();
     let (uis_tx, uis) = mpsc::unbounded_channel();
     let (admit, place) = if console {
         let me =
@@ -127,40 +141,50 @@ pub async fn start(
         log.clone(),
         ui::RETRY,
     ));
-    let supervisor_task = tokio::spawn(supervisor::run(
-        console,
-        clock,
-        host.clone(),
-        links_tx,
-        supervisor_rx,
-        log,
-    ));
+    let supervisors = [AgentRole::Session, AgentRole::Winlogon]
+        .into_iter()
+        .map(|role| {
+            let (commands, commands_rx) = mpsc::unbounded_channel();
+            let task = tokio::spawn(supervisor::run(
+                role,
+                console,
+                clock,
+                host.clone(),
+                links_tx.clone(),
+                commands_rx,
+                log.clone(),
+            ));
+            Supervisor { commands, task }
+        })
+        .collect();
     Ok(Service {
         host,
-        supervisor,
+        supervisors,
         host_task: running.task,
-        supervisor_task,
         ui_task,
     })
 }
 
-/// Goodbye to peers, end the agent link, finish writes, then make sure the
-/// agent has exited.
+/// Goodbye to peers, end the agent links, finish writes, then make sure
+/// both agents have exited.
 pub async fn stop(service: Service) {
     let (done, stopped) = oneshot::channel();
     if service.host.send(HostCommand::Stop(done)).is_ok() {
         let _ = tokio::time::timeout(Duration::from_secs(5), stopped).await;
     }
-    let (done, stopped) = oneshot::channel();
-    if service
-        .supervisor
-        .send(SupervisorCommand::Stop(done))
-        .is_ok()
-    {
-        let _ = tokio::time::timeout(Duration::from_secs(5), stopped).await;
+    let waits = service.supervisors.iter().filter_map(|s| {
+        let (done, stopped) = oneshot::channel();
+        s.commands.send(SupervisorCommand::Stop(done)).ok()?;
+        Some(tokio::time::timeout(Duration::from_secs(5), stopped))
+    });
+    let waits: Vec<_> = waits.collect();
+    for wait in waits {
+        let _ = wait.await;
     }
     let _ = service.host_task.await;
-    service.supervisor_task.abort();
+    for s in service.supervisors {
+        s.task.abort();
+    }
     service.ui_task.abort();
 }
 

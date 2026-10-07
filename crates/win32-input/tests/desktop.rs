@@ -13,7 +13,7 @@ use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use model::{CaptureMode, InputAction, InputEvent, Key, Origin, Point};
-use win32_input::{Capture, Captured, StartError, start};
+use win32_input::{Capture, Captured, Options, StartError, start};
 use windows::Win32::Foundation::POINT;
 use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
 use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
@@ -87,23 +87,26 @@ fn f24_becomes(want: bool) -> bool {
 #[ignore = "needs a desktop"]
 fn second_start_fails() {
     let _s = serial();
-    let (_capture, _rx) = start().unwrap();
-    assert!(matches!(start(), Err(StartError::AlreadyRunning)));
+    let (_capture, _rx) = start(Options::default()).unwrap();
+    assert!(matches!(
+        start(Options::default()),
+        Err(StartError::AlreadyRunning)
+    ));
 }
 
 #[test]
 #[ignore = "needs a desktop"]
 fn start_after_drop_succeeds() {
     let _s = serial();
-    drop(start().unwrap());
-    let (_capture, _rx) = start().unwrap();
+    drop(start(Options::default()).unwrap());
+    let (_capture, _rx) = start(Options::default()).unwrap();
 }
 
 #[test]
 #[ignore = "needs a desktop"]
 fn injected_key_is_reported_as_injected() {
     let _s = serial();
-    let (capture, rx) = start().unwrap();
+    let (capture, rx) = start(Options::default()).unwrap();
     press(&capture, &rx, F24, true);
     press(&capture, &rx, F24, false);
 }
@@ -112,7 +115,7 @@ fn injected_key_is_reported_as_injected() {
 #[ignore = "needs a desktop"]
 fn injected_key_passes_while_withholding_all() {
     let _s = serial();
-    let (capture, rx) = start().unwrap();
+    let (capture, rx) = start(Options::default()).unwrap();
     capture.set_mode(CaptureMode::WithholdAll);
     press(&capture, &rx, F24, true);
     let reached = f24_becomes(true);
@@ -125,7 +128,7 @@ fn injected_key_passes_while_withholding_all() {
 #[ignore = "needs a desktop"]
 fn injected_wheel_is_reported() {
     let _s = serial();
-    let (capture, rx) = start().unwrap();
+    let (capture, rx) = start(Options::default()).unwrap();
     for dy in [120, -120] {
         capture.inject(InputAction::Wheel { dx: 0, dy }).unwrap();
         let seen = wait_for(
@@ -141,7 +144,7 @@ fn injected_wheel_is_reported() {
 #[ignore = "needs a desktop"]
 fn injected_motion_is_reported_as_injected() {
     let _s = serial();
-    let (capture, rx) = start().unwrap();
+    let (capture, rx) = start(Options::default()).unwrap();
     for dx in [7, -7] {
         capture.inject(InputAction::Motion { dx, dy: 0 }).unwrap();
         let seen = wait_for(
@@ -157,7 +160,7 @@ fn injected_motion_is_reported_as_injected() {
 #[ignore = "needs a desktop"]
 fn warp_moves_the_cursor_without_motion() {
     let _s = serial();
-    let (capture, rx) = start().unwrap();
+    let (capture, rx) = start(Options::default()).unwrap();
     let Some(Captured::Screen(screen, _)) =
         wait_for(&rx, WAIT, |c| matches!(c, Captured::Screen(..)))
     else {
@@ -188,7 +191,7 @@ fn warp_moves_the_cursor_without_motion() {
 #[ignore = "needs a desktop"]
 fn first_screen_contains_the_cursor() {
     let _s = serial();
-    let (_capture, rx) = start().unwrap();
+    let (_capture, rx) = start(Options::default()).unwrap();
     let Some(Captured::Screen(screen, details)) =
         wait_for(&rx, WAIT, |c| matches!(c, Captured::Screen(..)))
     else {
@@ -208,10 +211,50 @@ fn first_screen_contains_the_cursor() {
 #[ignore = "needs a desktop"]
 fn unchanged_screen_is_not_reported_again() {
     let _s = serial();
-    let (_capture, rx) = start().unwrap();
+    let (_capture, rx) = start(Options::default()).unwrap();
     assert!(wait_for(&rx, WAIT, |c| matches!(c, Captured::Screen(..))).is_some());
     let again = wait_for(&rx, Duration::from_secs(5), |c| {
         matches!(c, Captured::Screen(..))
     });
     assert_eq!(again, None);
+}
+
+/// The reports that are not input, in order, for `within`.
+fn reports(rx: &Receiver<Captured>, within: Duration) -> Vec<Captured> {
+    let end = Instant::now() + within;
+    let mut out = Vec::new();
+    while let Ok(c) = rx.recv_timeout(end.saturating_duration_since(Instant::now())) {
+        if !matches!(c, Captured::Input { .. }) {
+            out.push(c);
+        }
+    }
+    out
+}
+
+#[test]
+#[ignore = "needs a desktop"]
+fn input_desktop_follows_the_first_screen() {
+    let _s = serial();
+    let (_capture, rx) = start(Options {
+        report_input_desktop: true,
+    })
+    .unwrap();
+    let got = reports(&rx, Duration::from_millis(500));
+    // Tests run on the user's desktop, which has the input.
+    assert!(
+        matches!(
+            got.as_slice(),
+            [Captured::Screen(..), Captured::InputDesktop(true)]
+        ),
+        "{got:?}"
+    );
+}
+
+#[test]
+#[ignore = "needs a desktop"]
+fn no_input_desktop_reports_unless_asked() {
+    let _s = serial();
+    let (_capture, rx) = start(Options::default()).unwrap();
+    let got = reports(&rx, Duration::from_millis(500));
+    assert!(matches!(got.as_slice(), [Captured::Screen(..)]), "{got:?}");
 }

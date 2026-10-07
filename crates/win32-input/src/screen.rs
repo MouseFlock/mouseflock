@@ -34,12 +34,14 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::{BOOL, PCWSTR, w};
 
-use crate::Captured;
 use crate::capture::{Ready, hidden_window, message_loop, thread_id};
 use crate::edid::{self, Edid, Target};
+use crate::{Captured, desktop};
 
 /// How often the screen is checked even without a display-change message.
 const RECHECK_MS: u32 = 2000;
+const SCREEN_TIMER: usize = 1;
+const DESKTOP_TIMER: usize = 2;
 const CLASS: PCWSTR = w!("DeskHopScreen");
 
 /// What lies behind one monitor's identity, for diagnostics.
@@ -85,7 +87,10 @@ thread_local! {
     static DIRTY: Cell<bool> = const { Cell::new(false) };
 }
 
-pub(crate) fn thread(tx: Sender<Captured>, ready: Ready) {
+/// The screen thread. With `report_desktop`, it also reports whether its
+/// desktop, the process's, is the input desktop: first right after the
+/// first screen, then on each change.
+pub(crate) fn thread(tx: Sender<Captured>, ready: Ready, report_desktop: bool) {
     let hwnd = match window() {
         Ok(h) => h,
         Err(e) => {
@@ -94,7 +99,11 @@ pub(crate) fn thread(tx: Sender<Captured>, ready: Ready) {
         }
     };
     // SAFETY: the window belongs to this thread; no callback is used.
-    unsafe { SetTimer(Some(hwnd), 1, RECHECK_MS, None) };
+    unsafe { SetTimer(Some(hwnd), SCREEN_TIMER, RECHECK_MS, None) };
+    if report_desktop {
+        // SAFETY: as above.
+        unsafe { SetTimer(Some(hwnd), DESKTOP_TIMER, desktop::POLL_MS, None) };
+    }
     let _ = ready.send(Ok(thread_id()));
 
     let mut edids = HashMap::new();
@@ -105,10 +114,23 @@ pub(crate) fn thread(tx: Sender<Captured>, ready: Ready) {
             let _ = tx.send(Captured::Screen(screen, details));
         }
     };
+    let mut desktops = desktop::Changes::default();
+    let mut check_desktop = || {
+        if let Some(active) = desktops.offer(desktop::own_is_input()) {
+            let _ = tx.send(Captured::InputDesktop(active));
+        }
+    };
     check(&mut edids);
+    if report_desktop {
+        check_desktop();
+    }
     message_loop(|msg| {
-        if msg.message == WM_TIMER || DIRTY.take() {
+        let timer = (msg.message == WM_TIMER).then_some(msg.wParam.0);
+        if timer == Some(SCREEN_TIMER) || DIRTY.take() {
             check(&mut edids);
+        }
+        if report_desktop && timer == Some(DESKTOP_TIMER) {
+            check_desktop();
         }
     });
     // SAFETY: the window was created on this thread.

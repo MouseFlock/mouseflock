@@ -16,7 +16,7 @@ use windows::Win32::System::RemoteDesktop::ProcessIdToSessionId;
 use windows::core::PCWSTR;
 
 use crate::handle::{Local, wide};
-use crate::sid::Sid;
+use crate::sid::{SYSTEM, Sid};
 use crate::token::SessionId;
 
 /// Most UI pipe instances, and so UIs connected, at once.
@@ -75,12 +75,16 @@ pub fn own_session() -> io::Result<SessionId> {
 }
 
 /// The pipe's DACL: SYSTEM gets everything, `user` may read and write.
-/// Protected, so nothing is inherited.
+/// Protected, so nothing is inherited. For an agent running as SYSTEM (the
+/// winlogon agent), SYSTEM is the only entry.
 ///
 /// Generic write includes the right to create a pipe instance. That is
 /// harmless: the pipe is created first with at most one instance, so no
 /// second instance of its name can exist.
 pub fn agent_pipe_sddl(user: &Sid) -> String {
+    if user.as_str() == SYSTEM {
+        return "D:P(A;;GA;;;SY)".to_owned();
+    }
     format!("D:P(A;;GA;;;SY)(A;;GRGW;;;{user})")
 }
 
@@ -160,6 +164,23 @@ mod tests {
             "D:P(A;;GA;;;SY)(A;;GRGW;;;S-1-5-21-1-2-3-1001)"
         );
         Descriptor::from_sddl(&agent_pipe_sddl(&user)).unwrap();
+    }
+
+    #[test]
+    fn sddl_for_a_system_agent_names_only_system() {
+        let sddl = agent_pipe_sddl(&Sid::parse(SYSTEM).unwrap());
+        assert_eq!(sddl, "D:P(A;;GA;;;SY)");
+        assert_eq!(sddl.matches("(A;").count(), 1);
+        Descriptor::from_sddl(&sddl).unwrap();
+    }
+
+    #[tokio::test]
+    async fn system_only_pipe_denies_this_user() {
+        // Tests run as a normal user (or an administrator), never SYSTEM.
+        let name = name("system");
+        let _server = create_agent_pipe(&name, &Sid::parse(SYSTEM).unwrap()).unwrap();
+        let err = ClientOptions::new().open(&name).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied, "{err}");
     }
 
     #[test]

@@ -1,15 +1,18 @@
 //! The one launch function (design D6). Every process the service starts is
 //! started here: the session agent, as the session's user (registered
-//! service) or as the console's own user (console mode).
+//! service) or as the console's own user (console mode), and the winlogon
+//! agent, as SYSTEM with privileges removed on the secure desktop
+//! (registered service only; add-winlogon-agent design D2, D3).
 
 use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use ipc::link::AgentRole;
 use rand_core::{OsRng, RngCore};
 use tokio::net::windows::named_pipe::NamedPipeServer;
 use tokio::sync::oneshot;
-use win32_session::{Process, SessionId, Sid, TokenError};
+use win32_session::{Desktop, Process, SessionId, Sid, TokenError};
 
 use crate::store::hex;
 
@@ -78,6 +81,8 @@ pub fn agent_path() -> std::io::Result<PathBuf> {
 /// A launched agent: its process ID, a way to end it, and its exit.
 pub struct Watch {
     pub id: u32,
+    /// The privileges the winlogon agent's token holds, for the log.
+    pub privileges: Option<Vec<String>>,
     kill: Kill,
     /// Resolves with the exit code when the process exits.
     pub exited: oneshot::Receiver<Option<u32>>,
@@ -104,16 +109,54 @@ impl Watch {
     }
 }
 
-/// Starts the session agent for `target`: creates its pipe for the user it
+/// The agent kind's name, for the log.
+pub fn name(role: AgentRole) -> &'static str {
+    match role {
+        AgentRole::Session => "session agent",
+        AgentRole::Winlogon => "winlogon agent",
+    }
+}
+
+/// The agent's command line after the executable.
+pub fn args(role: AgentRole, pipe: &str) -> [&str; 3] {
+    let kind = match role {
+        AgentRole::Session => "--session",
+        AgentRole::Winlogon => "--winlogon",
+    };
+    [kind, "--pipe", pipe]
+}
+
+/// The desktop an agent of `role` runs on.
+pub fn desktop(role: AgentRole) -> Desktop {
+    match role {
+        AgentRole::Session => Desktop::Default,
+        AgentRole::Winlogon => Desktop::Winlogon,
+    }
+}
+
+/// Starts an agent of `role` for `target`: creates its pipe for the user it
 /// will run as (a fresh name, first and only instance), then launches
-/// `deskhop-agent.exe --session --pipe <name>`. Returns the watch and the
-/// pipe, not yet connected.
-pub fn agent(target: Target) -> Result<(Watch, NamedPipeServer), LaunchError> {
+/// `deskhop-agent.exe --session|--winlogon --pipe <name>` on its desktop.
+/// Returns the watch and the pipe, not yet connected.
+///
+/// The session agent runs as the session's user, or in console mode as
+/// this process's user. The winlogon agent runs as SYSTEM with privileges
+/// removed, behind a pipe only SYSTEM can open; it needs a session target.
+pub fn agent(role: AgentRole, target: Target) -> Result<(Watch, NamedPipeServer), LaunchError> {
     let exe = agent_path().map_err(failed("cannot find the agent"))?;
     let dir = exe.parent().map(PathBuf::from).unwrap_or_default();
-    let token = match target {
-        Target::Session(session) => Some(win32_session::user_token(session)?),
-        Target::Console => None,
+    let token = match (role, target) {
+        (AgentRole::Session, Target::Session(session)) => Some(win32_session::user_token(session)?),
+        (AgentRole::Session, Target::Console) => None,
+        (AgentRole::Winlogon, Target::Session(session)) => Some(
+            win32_session::system_token(session)
+                .map_err(failed("cannot make the winlogon agent's token"))?,
+        ),
+        (AgentRole::Winlogon, Target::Console) => {
+            return Err(LaunchError::Failed(
+                "the winlogon agent needs the registered service".into(),
+            ));
+        }
     };
     let user: Sid = match &token {
         Some(t) => t.user_sid(),
@@ -131,12 +174,14 @@ pub fn agent(target: Target) -> Result<(Watch, NamedPipeServer), LaunchError> {
     }
     let (name, pipe) =
         created.ok_or_else(|| LaunchError::Failed("cannot create the agent pipe".into()))?;
-    let args = ["--session", "--pipe", name.as_str()];
+    let args = args(role, &name);
 
     let watch = match token {
         Some(token) => {
+            let privileges =
+                (role == AgentRole::Winlogon).then(|| token.privileges().unwrap_or_default());
             let process = Arc::new(
-                win32_session::launch_as(&token, &exe, &args, &dir)
+                win32_session::launch_as(&token, &exe, &args, &dir, desktop(role))
                     .map_err(failed("cannot launch the agent"))?,
             );
             let (tx, exited) = oneshot::channel();
@@ -146,6 +191,7 @@ pub fn agent(target: Target) -> Result<(Watch, NamedPipeServer), LaunchError> {
             });
             Watch {
                 id: process.id(),
+                privileges,
                 kill: Kill::Session(process),
                 exited,
             }
@@ -173,6 +219,7 @@ pub fn agent(target: Target) -> Result<(Watch, NamedPipeServer), LaunchError> {
             });
             Watch {
                 id,
+                privileges: None,
                 kill: Kill::Console(Some(kill)),
                 exited,
             }
@@ -186,6 +233,29 @@ mod tests {
     use super::*;
     use std::collections::BTreeSet;
     use std::path::Path;
+
+    #[test]
+    fn arguments_and_desktop_per_kind() {
+        assert_eq!(
+            args(AgentRole::Session, r"\\.\pipe\a"),
+            ["--session", "--pipe", r"\\.\pipe\a"]
+        );
+        assert_eq!(
+            args(AgentRole::Winlogon, r"\\.\pipe\b"),
+            ["--winlogon", "--pipe", r"\\.\pipe\b"]
+        );
+        assert_eq!(desktop(AgentRole::Session), Desktop::Default);
+        assert_eq!(desktop(AgentRole::Winlogon), Desktop::Winlogon);
+    }
+
+    #[test]
+    fn no_winlogon_agent_in_console_mode() {
+        let err = agent(AgentRole::Winlogon, Target::Console).err();
+        assert!(
+            matches!(&err, Some(LaunchError::Failed(e)) if e.contains("registered service")),
+            "{err:?}"
+        );
+    }
 
     #[test]
     fn pipe_names_are_unique() {

@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use ipc::frame::{self, Decoded};
-use ipc::link::{AgentEnd, FromAgent, FromService, LinkError, MAX_QUEUED, ServiceEnd};
+use ipc::link::{AgentEnd, AgentRole, FromAgent, FromService, LinkError, MAX_QUEUED, ServiceEnd};
 use ipc::message::{Hello, Role, ToAgent, ToService};
 use model::{CaptureMode, InputAction, InputEvent, Key, Millis, Origin, Point};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
@@ -88,7 +88,9 @@ async fn service_with_raw_agent(
         buf: Vec::new(),
     };
     raw.hello(Hello::this_release(Role::SessionAgent)).await;
-    let (handle, events) = ServiceEnd::accept(a, clock.reader()).await.unwrap();
+    let (handle, events) = ServiceEnd::accept(a, AgentRole::Session, clock.reader())
+        .await
+        .unwrap();
     let (ty, _) = raw.frame().await.unwrap();
     assert_eq!(ty, ipc::message::HELLO);
     (handle, events, raw)
@@ -111,8 +113,8 @@ fn key(at: u64, usage: u16, down: bool) -> ToService {
 async fn handshake_agrees_version_1() {
     let (a, b) = tokio::io::duplex(1024);
     let (service, agent) = tokio::join!(
-        ServiceEnd::accept(a, || Millis(0)),
-        AgentEnd::connect(b, || Millis(0)),
+        ServiceEnd::accept(a, AgentRole::Session, || Millis(0)),
+        AgentEnd::connect(b, AgentRole::Session, || Millis(0)),
     );
     assert!(service.is_ok());
     assert!(agent.is_ok());
@@ -126,7 +128,7 @@ async fn wrong_role_is_refused() {
         buf: Vec::new(),
     };
     raw.hello(Hello::this_release(Role::Ui)).await;
-    let result = ServiceEnd::accept(a, || Millis(0)).await;
+    let result = ServiceEnd::accept(a, AgentRole::Session, || Millis(0)).await;
     assert!(matches!(result, Err(LinkError::WrongRole(Role::Ui))));
 }
 
@@ -143,7 +145,7 @@ async fn versions_do_not_overlap() {
         role: Role::SessionAgent,
     })
     .await;
-    let result = ServiceEnd::accept(a, || Millis(0)).await;
+    let result = ServiceEnd::accept(a, AgentRole::Session, || Millis(0)).await;
     let Err(e @ LinkError::VersionMismatch { .. }) = result else {
         panic!("expected a version mismatch");
     };
@@ -153,7 +155,7 @@ async fn versions_do_not_overlap() {
 #[tokio::test(start_paused = true)]
 async fn silent_peer_times_out() {
     let (a, _b) = tokio::io::duplex(1024);
-    let result = ServiceEnd::accept(a, || Millis(0)).await;
+    let result = ServiceEnd::accept(a, AgentRole::Session, || Millis(0)).await;
     assert!(matches!(result, Err(LinkError::Timeout)));
 }
 
@@ -161,8 +163,8 @@ async fn silent_peer_times_out() {
 async fn commands_arrive_in_order() {
     let (a, b) = tokio::io::duplex(1024);
     let (service, agent) = tokio::join!(
-        ServiceEnd::accept(a, || Millis(0)),
-        AgentEnd::connect(b, || Millis(0)),
+        ServiceEnd::accept(a, AgentRole::Session, || Millis(0)),
+        AgentEnd::connect(b, AgentRole::Session, || Millis(0)),
     );
     let ((handle, _events), (_reports, mut commands)) = (service.unwrap(), agent.unwrap());
     let sent = [
@@ -206,8 +208,8 @@ async fn protocol_error_closes_the_link() {
 async fn dropping_the_handle_closes_the_agent_end() {
     let (a, b) = tokio::io::duplex(1024);
     let (service, agent) = tokio::join!(
-        ServiceEnd::accept(a, || Millis(0)),
-        AgentEnd::connect(b, || Millis(0)),
+        ServiceEnd::accept(a, AgentRole::Session, || Millis(0)),
+        AgentEnd::connect(b, AgentRole::Session, || Millis(0)),
     );
     let ((handle, _events), (_reports, mut commands)) = (service.unwrap(), agent.unwrap());
     drop(handle);
@@ -293,8 +295,8 @@ async fn agent_end_answers_ping_with_its_clock() {
     let service_clock = Clock::default();
     service_clock.set(10);
     let (service, agent) = tokio::join!(
-        ServiceEnd::accept(a, service_clock.reader()),
-        AgentEnd::connect(b, agent_clock.reader()),
+        ServiceEnd::accept(a, AgentRole::Session, service_clock.reader()),
+        AgentEnd::connect(b, AgentRole::Session, agent_clock.reader()),
     );
     let ((_handle, mut events), (reports, _commands)) = (service.unwrap(), agent.unwrap());
     // Offset 767: an event at agent time 800 is service time 33.

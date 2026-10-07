@@ -78,11 +78,20 @@ pub struct Capture {
     workers: Vec<Worker>,
 }
 
+/// What [`start`] reports besides input and the screen.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Options {
+    /// Report [`Captured::InputDesktop`]: once right after the first
+    /// [`Captured::Screen`], then within 100 ms of each change. For the
+    /// winlogon agent.
+    pub report_input_desktop: bool,
+}
+
 /// Installs the hooks, registers for Raw Input, and starts reporting.
 ///
 /// The first [`Captured::Screen`] arrives promptly after start. Fails if a
 /// capture is already running in this process.
-pub fn start() -> Result<(Capture, Receiver<Captured>), StartError> {
+pub fn start(options: Options) -> Result<(Capture, Receiver<Captured>), StartError> {
     if RUNNING
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
         .is_err()
@@ -98,9 +107,12 @@ pub fn start() -> Result<(Capture, Receiver<Captured>), StartError> {
     capture
         .workers
         .push(Worker::spawn("deskhop-input", input_thread, tx.clone())?);
-    capture
-        .workers
-        .push(Worker::spawn("deskhop-screen", screen::thread, tx)?);
+    let report_desktop = options.report_input_desktop;
+    capture.workers.push(Worker::spawn(
+        "deskhop-screen",
+        move |tx, ready| screen::thread(tx, ready, report_desktop),
+        tx,
+    )?);
     Ok((capture, rx))
 }
 
@@ -170,7 +182,7 @@ pub(crate) type Ready = SyncSender<windows::core::Result<u32>>;
 impl Worker {
     fn spawn(
         name: &str,
-        body: fn(Sender<Captured>, Ready),
+        body: impl FnOnce(Sender<Captured>, Ready) + Send + 'static,
         tx: Sender<Captured>,
     ) -> Result<Worker, StartError> {
         let (ready_tx, ready_rx) = mpsc::sync_channel(1);

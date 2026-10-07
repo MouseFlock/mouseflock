@@ -19,6 +19,9 @@
 //! does nothing else, so a hook call never waits behind slow work. The
 //! screen thread enumerates monitors on display-change messages and every
 //! 2 seconds, and reports only a screen that differs from the last one.
+//! With [`Options::report_input_desktop`] it also checks every 50 ms
+//! whether the process's desktop is the input desktop, for the winlogon
+//! agent on the secure desktop.
 //!
 //! # Origin
 //!
@@ -30,6 +33,7 @@
 mod capture;
 mod clock;
 mod decide;
+mod desktop;
 mod edid;
 mod inject;
 mod keys;
@@ -37,7 +41,7 @@ mod screen;
 
 use model::{InputEvent, Millis, Origin, Screen};
 
-pub use capture::{Capture, StartError, start};
+pub use capture::{Capture, Options, StartError, start};
 pub use clock::now;
 pub use edid::Edid;
 pub use inject::{InjectError, WarpError};
@@ -56,4 +60,8 @@ pub enum Captured {
     /// The monitors, at start and whenever they change, with the details
     /// behind each monitor's identity for diagnostics.
     Screen(Screen, Vec<MonitorDetail>),
+    /// Whether the process's desktop is the input desktop, with
+    /// [`Options::report_input_desktop`]: right after the first screen, then
+    /// on each change.
+    InputDesktop(bool),
 }

@@ -152,8 +152,8 @@ pub fn describe(report: &Report) -> String {
             "learned: {name} is to the {}; type `undo` within {undo_secs} s to take it back",
             side_name(*side)
         ),
-        Report::AgentLinked => "agent linked".into(),
-        Report::AgentGone => "agent gone".into(),
+        Report::AgentLinked(role) => format!("{} linked", crate::launch::name(*role)),
+        Report::AgentGone(role) => format!("{} gone", crate::launch::name(*role)),
     }
 }
 

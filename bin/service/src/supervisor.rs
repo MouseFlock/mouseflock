@@ -1,4 +1,7 @@
-//! Keeps one session agent running for the console session (design D5).
+//! Keeps one agent of each kind running for the console session (design
+//! D5; add-winlogon-agent design D4): the session agent while a user is
+//! logged on there, and the winlogon agent whenever the console has a
+//! session. Each kind has its own [`run`] task.
 //!
 //! [`Plan`] is a pure state machine over time: which session should have an
 //! agent, when to launch, when to give up on a start, when to terminate.
@@ -8,11 +11,12 @@
 
 use std::time::Duration;
 
-use ipc::link::{AgentHandle, FromAgent, LinkError, ServiceEnd};
+use ipc::link::{AgentHandle, AgentRole, FromAgent, LinkError, ServiceEnd};
 use tokio::net::windows::named_pipe::NamedPipeServer;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::Instant;
 use transport::Backoff;
+use win32_session::SessionId;
 
 use crate::host::{AgentLink, Clock, HostCommand};
 use crate::launch::{self, Target, Watch};
@@ -23,6 +27,8 @@ use crate::{info, warn};
 pub const START_LIMIT: Duration = Duration::from_secs(10);
 /// An agent whose link ended must exit within this long.
 pub const END_LIMIT: Duration = Duration::from_secs(2);
+/// How often the target is read again besides session notifications.
+pub const RECHECK: Duration = Duration::from_secs(1);
 /// A link up this long resets the backoff.
 pub const STABLE: Duration = Duration::from_secs(30);
 
@@ -74,8 +80,10 @@ impl<T: Copy + Eq> Default for Plan<T> {
 }
 
 impl<T: Copy + Eq> Plan<T> {
-    /// The session that should have an agent, if any, changed.
+    /// Where the agent should run, read again. Reading the same target again
+    /// changes nothing, so it may be read as often as needed.
     pub fn set_target(&mut self, target: Option<T>, now: Duration) -> Vec<Action<T>> {
+        let changed = target != self.target;
         self.target = target;
         let out = match self.agent {
             Agent::Starting { target: t, .. } if Some(t) != target => {
@@ -90,8 +98,11 @@ impl<T: Copy + Eq> Plan<T> {
             }
             _ => Vec::new(),
         };
-        // A new session is not a failure: launch there without waiting.
-        self.retry_at = self.retry_at.min(now);
+        // A new session is not a failure: launch there without waiting. The
+        // same session keeps its backoff.
+        if changed {
+            self.retry_at = self.retry_at.min(now);
+        }
         if out.is_empty() {
             self.try_launch(now)
         } else {
@@ -233,10 +244,11 @@ impl std::fmt::Display for AcceptError {
 }
 
 /// Waits for a client on `pipe`, checks it is process `expected` before
-/// reading anything, and runs the service end's handshake.
+/// reading anything, and runs the service end's handshake for `role`.
 pub async fn accept_agent(
     pipe: NamedPipeServer,
     expected: u32,
+    role: AgentRole,
     clock: Clock,
 ) -> Result<(AgentHandle, mpsc::UnboundedReceiver<FromAgent>), AcceptError> {
     let accept = async {
@@ -245,7 +257,7 @@ pub async fn accept_agent(
         if found != expected {
             return Err(AcceptError::WrongProcess { expected, found });
         }
-        ServiceEnd::accept(pipe, move || clock.now())
+        ServiceEnd::accept(pipe, role, move || clock.now())
             .await
             .map_err(AcceptError::Link)
     };
@@ -276,21 +288,53 @@ struct Current {
     ended: Option<oneshot::Receiver<()>>,
 }
 
-/// Where the agent should run now: the console session if a user is logged
-/// on there (registered service), or this console (console mode).
-pub fn find_target(console: bool, log: &Log) -> Option<Target> {
-    if console {
-        return Some(Target::Console);
+/// Where an agent of `role` should run.
+///
+/// - Session agent: this console in console mode; otherwise the console
+///   session, if a user is logged on to it.
+/// - Winlogon agent: never in console mode; otherwise the console session,
+///   logged on or not.
+///
+/// `logged_on` is asked only when it decides the answer.
+pub fn target(
+    role: AgentRole,
+    console: bool,
+    console_session: Option<SessionId>,
+    logged_on: impl FnOnce(SessionId) -> bool,
+) -> Option<Target> {
+    match (role, console) {
+        (AgentRole::Session, true) => Some(Target::Console),
+        (AgentRole::Winlogon, true) => None,
+        (AgentRole::Session, false) => console_session
+            .filter(|s| logged_on(*s))
+            .map(Target::Session),
+        (AgentRole::Winlogon, false) => console_session.map(Target::Session),
     }
-    let session = win32_session::active_console_session()?;
-    match win32_session::user_token(session) {
-        Ok(_) => Some(Target::Session(session)),
-        Err(win32_session::TokenError::NoUser) => None,
-        Err(e) => {
-            warn!(log, "session {session}: {e}");
-            None
-        }
-    }
+}
+
+/// [`target`], reading the console session and its user from Windows. A
+/// token error is logged to `log`, if given.
+pub fn find_target(role: AgentRole, console: bool, log: Option<&Log>) -> Option<Target> {
+    let session = if console {
+        None
+    } else {
+        win32_session::active_console_session()
+    };
+    target(
+        role,
+        console,
+        session,
+        |session| match win32_session::user_token(session) {
+            Ok(_) => true,
+            Err(win32_session::TokenError::NoUser) => false,
+            Err(e) => {
+                if let Some(log) = log {
+                    warn!(log, "session {session}: {e}");
+                }
+                false
+            }
+        },
+    )
 }
 
 /// What the current agent did.
@@ -320,8 +364,9 @@ async fn wake(at: Option<Instant>) {
     }
 }
 
-/// Runs the supervisor until stopped.
+/// Runs the supervisor for agents of `role` until stopped.
 pub async fn run(
+    role: AgentRole,
     console: bool,
     clock: Clock,
     host: mpsc::UnboundedSender<HostCommand>,
@@ -336,20 +381,40 @@ pub async fn run(
     let mut current: Option<Current> = None;
     let mut generation = 0u64;
     let mut stopped: Option<oneshot::Sender<()>> = None;
-    let mut actions = plan.set_target(find_target(console, &log), now());
+    let agent = launch::name(role);
+    if console && role == AgentRole::Winlogon {
+        info!(
+            log,
+            "no {agent} in console mode: it needs the registered service"
+        );
+    }
+    let mut actions = plan.set_target(find_target(role, console, Some(&log)), now());
+    // Session notifications can arrive before Windows reports the new
+    // console session, as when signing out moves the logon screen to a new
+    // session. Reading the target again catches up.
+    let mut recheck = tokio::time::interval_at(start + RECHECK, RECHECK);
+    recheck.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     loop {
         while let Some(action) = actions.pop() {
             match action {
-                Action::Launch(target) => match launch::agent(target) {
+                Action::Launch(target) => match launch::agent(role, target) {
                     Ok((watch, pipe)) => {
                         generation += 1;
                         let g = generation;
-                        info!(log, "launched agent {} in {target}", watch.id);
+                        match &watch.privileges {
+                            Some(p) => info!(
+                                log,
+                                "launched {agent} {} in {target}, privileges: {}",
+                                watch.id,
+                                p.join(", ")
+                            ),
+                            None => info!(log, "launched {agent} {} in {target}", watch.id),
+                        }
                         let tx = internal_tx.clone();
                         let expected = watch.id;
                         tokio::spawn(async move {
-                            let up = accept_agent(pipe, expected, clock).await;
+                            let up = accept_agent(pipe, expected, role, clock).await;
                             let _ = tx.send(Internal::Up(g, up));
                         });
                         current = Some(Current {
@@ -359,16 +424,16 @@ pub async fn run(
                         });
                     }
                     Err(e) => {
-                        warn!(log, "cannot launch the agent in {target}: {e}");
+                        warn!(log, "cannot launch the {agent} in {target}: {e}");
                         plan.launch_failed(now());
                     }
                 },
                 Action::EndLink => {
-                    let _ = host.send(HostCommand::DropLink);
+                    let _ = host.send(HostCommand::DropLink(role));
                 }
                 Action::Terminate => {
                     if let Some(c) = &mut current {
-                        warn!(log, "terminating agent {}", c.watch.id);
+                        warn!(log, "terminating {agent} {}", c.watch.id);
                         c.watch.terminate();
                     }
                 }
@@ -385,7 +450,7 @@ pub async fn run(
         tokio::select! {
             command = commands.recv() => match command {
                 Some(SupervisorCommand::SessionsChanged) => {
-                    actions = plan.set_target(find_target(console, &log), now());
+                    actions = plan.set_target(find_target(role, console, Some(&log)), now());
                 }
                 Some(SupervisorCommand::Stop(done)) => {
                     stopped = Some(done);
@@ -396,7 +461,7 @@ pub async fn run(
             seen = watch(&mut current) => match seen {
                 Seen::Exited(code) => {
                     if let Some(c) = current.take() {
-                        info!(log, "agent {} exited with {code:?}", c.watch.id);
+                        info!(log, "{agent} {} exited with {code:?}", c.watch.id);
                     }
                     actions = plan.exited(now());
                 }
@@ -417,7 +482,7 @@ pub async fn run(
                     let _ = links.send(AgentLink { handle, events, ended: ended_tx });
                 }
                 Internal::Up(g, Err(e)) if current.as_ref().is_some_and(|c| c.generation == g) => {
-                    warn!(log, "agent did not link: {e}");
+                    warn!(log, "{agent} did not link: {e}");
                     if let Some(c) = &mut current {
                         c.watch.terminate();
                     }
@@ -425,6 +490,9 @@ pub async fn run(
                 Internal::Up(..) => {}
             },
             () = wake(wake_at) => actions = plan.tick(now()),
+            _ = recheck.tick() => {
+                actions = plan.set_target(find_target(role, console, None), now());
+            }
         }
     }
 }
@@ -483,6 +551,24 @@ mod tests {
     }
 
     #[test]
+    fn reading_the_same_target_keeps_the_backoff() {
+        let mut p = P::default();
+        assert_eq!(p.set_target(Some(A), ms(0)), [Action::Launch(A)]);
+        assert_eq!(p.exited(ms(0)), []);
+        assert_eq!(p.next_wake(), Some(ms(500)));
+        // Rechecks find the same session: no launch before the backoff.
+        assert_eq!(p.set_target(Some(A), ms(100)), []);
+        assert_eq!(p.next_wake(), Some(ms(500)));
+        // A linked agent in the same session is left alone.
+        assert_eq!(p.tick(ms(500)), [Action::Launch(A)]);
+        p.linked(ms(600));
+        assert_eq!(p.set_target(Some(A), secs(5)), []);
+        // A new session still launches at once.
+        p.exited(secs(6));
+        assert_eq!(p.set_target(Some(B), secs(6)), [Action::Launch(B)]);
+    }
+
+    #[test]
     fn backoff_resets_after_a_stable_link() {
         let mut p = P::default();
         p.set_target(Some(A), ms(0));
@@ -532,6 +618,34 @@ mod tests {
         assert_eq!(p.set_target(Some(B), secs(61)), []);
     }
 
+    const S: SessionId = SessionId(3);
+
+    #[test]
+    fn targets() {
+        use AgentRole::{Session, Winlogon};
+        let user = |_| true;
+        let nobody = |_| false;
+        let unasked = |_: SessionId| -> bool { panic!("asked whether a user is logged on") };
+
+        // Console mode: the session agent here, never a winlogon agent.
+        assert_eq!(target(Session, true, None, unasked), Some(Target::Console));
+        assert_eq!(target(Winlogon, true, Some(S), unasked), None);
+        // Registered service, user logged on: both in the console session.
+        assert_eq!(
+            target(Session, false, Some(S), user),
+            Some(Target::Session(S))
+        );
+        assert_eq!(
+            target(Winlogon, false, Some(S), unasked),
+            Some(Target::Session(S))
+        );
+        // Logon screen: only the winlogon agent.
+        assert_eq!(target(Session, false, Some(S), nobody), None);
+        // No session attached to the console, briefly while it switches.
+        assert_eq!(target(Session, false, None, unasked), None);
+        assert_eq!(target(Winlogon, false, None, unasked), None);
+    }
+
     #[test]
     fn no_user_no_launch() {
         let mut p = P::default();
@@ -547,7 +661,12 @@ mod tests {
         let name = launch::pipe_name();
         let pipe =
             win32_session::create_agent_pipe(&name, &win32_session::own_sid().unwrap()).unwrap();
-        let accepting = tokio::spawn(accept_agent(pipe, std::process::id() + 1, Clock::new()));
+        let accepting = tokio::spawn(accept_agent(
+            pipe,
+            std::process::id() + 1,
+            AgentRole::Session,
+            Clock::new(),
+        ));
         let mut client = loop {
             match ClientOptions::new().open(&name) {
                 Ok(c) => break c,

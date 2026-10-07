@@ -1,14 +1,17 @@
 //! IPC frames decoded as every end would: `Hello`, then each frame as an
 //! agent-link message to the service and to an agent, and as a UI command
-//! and a UI event. Decoded messages re-encode to the same payload, and
-//! clipboard messages drive a run at the end that receives them.
+//! and a UI event. Decoded messages re-encode to the same payload, agent
+//! messages are checked against both agent roles, and clipboard messages
+//! drive a run at the end that receives them.
 
 #![no_main]
 #![forbid(unsafe_code)]
 
 use ipc::clipboard::RunAssembler;
 use ipc::frame::{self, Decoded, HEADER_LEN};
-use ipc::message::{ClipboardToAgent, Hello, ToAgent, ToAgentAny, ToService};
+use ipc::message::{
+    ClipboardToAgent, Hello, Role, ToAgent, ToAgentAny, ToService, check_agent_role,
+};
 use ipc::ui::{UiCommand, UiEvent};
 use libfuzzer_sys::fuzz_target;
 
@@ -23,6 +26,9 @@ fuzz_target!(|data: &[u8]| {
                 let _ = Hello::decode(frame.payload);
                 if let Ok(m) = ToService::decode(frame.ty, frame.payload, 1) {
                     assert_eq!(m.payload().ok().as_deref(), Some(frame.payload));
+                    for role in [Role::SessionAgent, Role::WinlogonAgent] {
+                        let _ = check_agent_role(frame.ty, role);
+                    }
                     let _ = match &m {
                         ToService::ClipboardText(len) => service_runs.start(frame.ty, *len).map(|_| ()),
                         ToService::ClipboardChunk(b) => service_runs.chunk(frame.ty, b).map(|_| ()),
