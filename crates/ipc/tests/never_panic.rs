@@ -4,7 +4,9 @@
 
 use ipc::clipboard::{NotShared, RunAssembler};
 use ipc::frame::{self, Decoded, HEADER_LEN};
-use ipc::message::{ClipboardToAgent, Hello, Role, ToAgent, ToAgentAny, ToService};
+use ipc::message::{
+    ClipboardToAgent, Hello, Role, ToAgent, ToAgentAny, ToService, check_agent_role,
+};
 use ipc::ui::{FocusOf, Member, Pairing, Status, UiCommand, UiEvent};
 use model::{
     Button, CaptureMode, InputAction, InputEvent, Key, Millis, Monitor, MonitorId, Origin, Point,
@@ -64,6 +66,9 @@ fn drive(input: &[u8]) {
                 let _ = Hello::decode(frame.payload);
                 if let Ok(m) = ToService::decode(frame.ty, frame.payload, 1) {
                     assert_eq!(m.payload().unwrap(), frame.payload);
+                    for role in [Role::SessionAgent, Role::WinlogonAgent] {
+                        let _ = check_agent_role(frame.ty, role);
+                    }
                     run_service(&mut service_runs, &m);
                 }
                 if let Ok(m) = ToAgent::decode(frame.ty, frame.payload, 1) {
@@ -121,7 +126,10 @@ fn valid_frames(rng: &mut Rng) -> Vec<u8> {
         .encode_frame(&mut out)
         .unwrap();
     for _ in 0..rng.below(4) {
-        match rng.below(11) {
+        match rng.below(12) {
+            11 => ToService::InputDesktop(rng.below(2) == 0)
+                .encode_frame(&mut out)
+                .unwrap(),
             8 => {
                 let len = rng.below(20);
                 let text = rng.bytes(len);

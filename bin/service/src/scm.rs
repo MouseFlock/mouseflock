@@ -17,7 +17,6 @@ use windows_service::{define_windows_service, service_dispatcher};
 
 use crate::host::{GOODBYE_WAIT, HostCommand, Sas};
 use crate::log::Log;
-use crate::supervisor::SupervisorCommand;
 use crate::{error, info, store};
 
 pub const SERVICE_NAME: &str = "DeskHop";
@@ -179,7 +178,7 @@ fn run_service() -> windows_service::Result<()> {
             match event {
                 Event::Control(Control::Stop) => break,
                 Event::Control(Control::SessionsChanged) => {
-                    let _ = service.supervisor.send(SupervisorCommand::SessionsChanged);
+                    service.sessions_changed();
                 }
                 Event::Control(Control::Resume) => {
                     let _ = service.host.send(HostCommand::Resume);

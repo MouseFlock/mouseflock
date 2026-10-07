@@ -29,6 +29,8 @@ pub const CLIPBOARD_TEXT: u16 = 0x0016;
 pub const CLIPBOARD_CHUNK: u16 = 0x0017;
 /// The newest copy is not shared, and why.
 pub const CLIPBOARD_NOT_SHARED: u16 = 0x0018;
+/// Whether the winlogon agent's desktop is the input desktop.
+pub const INPUT_DESKTOP: u16 = 0x0019;
 
 pub const SET_CAPTURE: u16 = 0x0020;
 pub const INJECT_KEY: u16 = 0x0021;
@@ -99,6 +101,7 @@ pub const REGISTRY: &[TypeInfo] = &[
         "ClipboardNotShared",
         Direction::AgentToService,
     ),
+    info(INPUT_DESKTOP, "InputDesktop", Direction::AgentToService),
     info(SET_CAPTURE, "SetCapture", Direction::ServiceToAgent),
     info(INJECT_KEY, "InjectKey", Direction::ServiceToAgent),
     info(INJECT_BUTTON, "InjectButton", Direction::ServiceToAgent),
@@ -148,6 +151,24 @@ pub fn check(
         return Err(ProtocolError::WrongDirection { ty });
     }
     Ok(info)
+}
+
+/// Checks that an agent with `role` may send `ty`: the clipboard types only
+/// from the session agent, `InputDesktop` only from the winlogon agent.
+pub fn check_agent_role(ty: u16, role: Role) -> Result<(), ProtocolError> {
+    let allowed = match ty {
+        CLIPBOARD_TEXT | CLIPBOARD_CHUNK | CLIPBOARD_NOT_SHARED => role == Role::SessionAgent,
+        INPUT_DESKTOP => role == Role::WinlogonAgent,
+        _ => true,
+    };
+    if allowed {
+        Ok(())
+    } else {
+        Err(ProtocolError::WrongRole {
+            ty,
+            role: role.code(),
+        })
+    }
 }
 
 // ---- Hello ----------------------------------------------------------------
@@ -431,6 +452,9 @@ pub enum ToService {
     ClipboardChunk(Vec<u8>),
     /// The newest copy is not shared.
     ClipboardNotShared(NotShared),
+    /// Whether the agent's own desktop is the input desktop. Winlogon
+    /// agent only.
+    InputDesktop(bool),
 }
 
 impl ToService {
@@ -447,6 +471,7 @@ impl ToService {
             Self::ClipboardText(_) => CLIPBOARD_TEXT,
             Self::ClipboardChunk(_) => CLIPBOARD_CHUNK,
             Self::ClipboardNotShared(_) => CLIPBOARD_NOT_SHARED,
+            Self::InputDesktop(_) => INPUT_DESKTOP,
         }
     }
 
@@ -504,6 +529,7 @@ impl ToService {
             Self::ClipboardText(len) => p.extend_from_slice(&text_len(*len)?.to_le_bytes()),
             Self::ClipboardChunk(bytes) => p.extend_from_slice(chunk(bytes)?),
             Self::ClipboardNotShared(why) => p.push(why.code()),
+            Self::InputDesktop(active) => p.push(u8::from(*active)),
         }
         Ok(p)
     }
@@ -576,6 +602,14 @@ impl ToService {
             CLIPBOARD_NOT_SHARED => {
                 exactly(ty, payload, 1)?;
                 Self::ClipboardNotShared(NotShared::from_code(ty, f.u8()?)?)
+            }
+            INPUT_DESKTOP => {
+                exactly(ty, payload, 1)?;
+                Self::InputDesktop(match f.u8()? {
+                    0 => false,
+                    1 => true,
+                    value => return Err(ProtocolError::InvalidCode { ty, value }),
+                })
             }
             _ => return Err(ProtocolError::UnknownType { ty }),
         };
@@ -1186,6 +1220,68 @@ mod tests {
 
         let too_wide = ToService::Screen(Screen::new(vec![monitor("a", 0, 96)]));
         assert_eq!(too_wide.payload(), Err(EncodeError::InvalidScreen));
+    }
+
+    #[test]
+    fn input_desktop_round_trip_and_limits() {
+        for active in [false, true] {
+            let m = ToService::InputDesktop(active);
+            assert_eq!(m.payload().unwrap(), [u8::from(active)]);
+            assert_eq!(
+                ToService::decode(INPUT_DESKTOP, &[u8::from(active)], 1),
+                Ok(m)
+            );
+        }
+        assert_eq!(
+            ToService::decode(INPUT_DESKTOP, &[2], 1),
+            Err(ProtocolError::InvalidCode {
+                ty: INPUT_DESKTOP,
+                value: 2
+            })
+        );
+        for bad in [&[][..], &[1, 0]] {
+            assert!(matches!(
+                ToService::decode(INPUT_DESKTOP, bad, 1),
+                Err(ProtocolError::PayloadLength { .. })
+            ));
+        }
+        // Agent → service only.
+        assert_eq!(
+            ToAgent::decode(INPUT_DESKTOP, &[1], 1),
+            Err(ProtocolError::WrongDirection { ty: INPUT_DESKTOP })
+        );
+    }
+
+    #[test]
+    fn messages_per_agent_role() {
+        let session = Role::SessionAgent;
+        let winlogon = Role::WinlogonAgent;
+        for ty in [CLIPBOARD_TEXT, CLIPBOARD_CHUNK, CLIPBOARD_NOT_SHARED] {
+            assert_eq!(check_agent_role(ty, session), Ok(()));
+            assert_eq!(
+                check_agent_role(ty, winlogon),
+                Err(ProtocolError::WrongRole { ty, role: 2 })
+            );
+        }
+        assert_eq!(check_agent_role(INPUT_DESKTOP, winlogon), Ok(()));
+        assert_eq!(
+            check_agent_role(INPUT_DESKTOP, session),
+            Err(ProtocolError::WrongRole {
+                ty: INPUT_DESKTOP,
+                role: 1
+            })
+        );
+        for ty in [
+            KEY_EVENT,
+            BUTTON_EVENT,
+            WHEEL_EVENT,
+            MOTION_EVENT,
+            SCREEN,
+            PONG,
+        ] {
+            assert_eq!(check_agent_role(ty, session), Ok(()));
+            assert_eq!(check_agent_role(ty, winlogon), Ok(()));
+        }
     }
 
     #[test]

@@ -1,11 +1,17 @@
-//! Sessions and the user tokens that belong to them.
+//! Sessions, the user tokens that belong to them, and the winlogon agent's
+//! restricted SYSTEM token.
 
 use std::fmt;
 use std::io;
 
-use windows::Win32::Foundation::{ERROR_NO_TOKEN, HANDLE};
+use windows::Win32::Foundation::{ERROR_NO_TOKEN, HANDLE, LUID};
 use windows::Win32::Security::Authorization::ConvertSidToStringSidW;
-use windows::Win32::Security::{GetTokenInformation, TOKEN_QUERY, TOKEN_USER, TokenUser};
+use windows::Win32::Security::{
+    CreateRestrictedToken, DISABLE_MAX_PRIVILEGE, GetTokenInformation, LUID_AND_ATTRIBUTES,
+    LookupPrivilegeNameW, SetTokenInformation, TOKEN_ACCESS_MASK, TOKEN_ADJUST_DEFAULT,
+    TOKEN_ADJUST_SESSIONID, TOKEN_ASSIGN_PRIMARY, TOKEN_DUPLICATE, TOKEN_INFORMATION_CLASS,
+    TOKEN_PRIVILEGES, TOKEN_QUERY, TOKEN_USER, TokenPrivileges, TokenSessionId, TokenUser,
+};
 use windows::Win32::System::RemoteDesktop::{WTSGetActiveConsoleSessionId, WTSQueryUserToken};
 use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 use windows::core::PWSTR;
@@ -68,11 +74,62 @@ pub fn user_token(session: SessionId) -> Result<Token, TokenError> {
 
 /// This process's own token.
 pub(crate) fn own_token() -> io::Result<Token> {
+    open_own_token(TOKEN_QUERY)
+}
+
+fn open_own_token(access: TOKEN_ACCESS_MASK) -> io::Result<Token> {
     let mut token = HANDLE::default();
     // SAFETY: the pseudo-handle from `GetCurrentProcess` needs no closing;
     // `token` is a valid out-pointer whose handle this function then owns.
-    unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) }?;
+    unsafe { OpenProcessToken(GetCurrentProcess(), access, &mut token) }?;
     Ok(Token(Owned(token)))
+}
+
+/// A primary copy of this process's token with every privilege removed
+/// except `SeChangeNotifyPrivilege`. Its handle may also set the session.
+fn restricted_own_token() -> io::Result<Token> {
+    let own = open_own_token(
+        TOKEN_DUPLICATE
+            | TOKEN_QUERY
+            | TOKEN_ASSIGN_PRIMARY
+            | TOKEN_ADJUST_DEFAULT
+            | TOKEN_ADJUST_SESSIONID,
+    )?;
+    let mut token = HANDLE::default();
+    // SAFETY: `own` is open for the call; no SIDs or privileges are passed
+    // by list; `token` is a valid out-pointer whose handle this function
+    // then owns. The new handle has the same access as `own`'s.
+    unsafe {
+        CreateRestrictedToken(
+            own.handle(),
+            DISABLE_MAX_PRIVILEGE,
+            None,
+            None,
+            None,
+            &mut token,
+        )
+    }?;
+    Ok(Token(Owned(token)))
+}
+
+/// The winlogon agent's token: this process's (SYSTEM's) token with every
+/// privilege removed except `SeChangeNotifyPrivilege`, moved to `session`.
+/// It keeps System integrity, which injecting into the secure desktop
+/// needs. Moving it needs `SeTcbPrivilege`, so SYSTEM.
+pub fn system_token(session: SessionId) -> io::Result<Token> {
+    let token = restricted_own_token()?;
+    let id = session.0;
+    // SAFETY: the handle is open with TOKEN_ADJUST_SESSIONID; the buffer is
+    // the u32 session ID TokenSessionId expects, and outlives the call.
+    unsafe {
+        SetTokenInformation(
+            token.handle(),
+            TokenSessionId,
+            (&raw const id).cast(),
+            size_of::<u32>() as u32,
+        )
+    }?;
+    Ok(token)
 }
 
 /// The user this process runs as.
@@ -85,24 +142,46 @@ impl Token {
         self.0.0
     }
 
-    /// The user the token belongs to.
-    pub fn user_sid(&self) -> io::Result<Sid> {
+    /// The token information of `class`, in an 8-byte aligned buffer.
+    fn information(&self, class: TOKEN_INFORMATION_CLASS) -> io::Result<Vec<u64>> {
         let mut len = 0u32;
         // SAFETY: a size query with no buffer; it fails with
         // ERROR_INSUFFICIENT_BUFFER and sets `len`.
-        let _ = unsafe { GetTokenInformation(self.handle(), TokenUser, None, 0, &mut len) };
-        // u64 elements keep the buffer aligned for TOKEN_USER's pointer.
+        let _ = unsafe { GetTokenInformation(self.handle(), class, None, 0, &mut len) };
+        // u64 elements keep the buffer aligned for the structures' pointers.
         let mut buf = vec![0u64; (len as usize).div_ceil(8).max(1)];
         // SAFETY: `buf` holds at least `len` bytes and is 8-byte aligned.
         unsafe {
             GetTokenInformation(
                 self.handle(),
-                TokenUser,
+                class,
                 Some(buf.as_mut_ptr().cast()),
                 len,
                 &mut len,
             )
         }?;
+        Ok(buf)
+    }
+
+    /// The names of the privileges the token holds, enabled or not, such
+    /// as `SeChangeNotifyPrivilege`.
+    pub fn privileges(&self) -> io::Result<Vec<String>> {
+        let buf = self.information(TokenPrivileges)?;
+        // SAFETY: on success the buffer starts with a TOKEN_PRIVILEGES whose
+        // `PrivilegeCount` entries follow its header inside the same buffer.
+        let entries: &[LUID_AND_ATTRIBUTES] = unsafe {
+            let header = buf.as_ptr().cast::<TOKEN_PRIVILEGES>();
+            std::slice::from_raw_parts(
+                (&raw const (*header).Privileges).cast(),
+                (*header).PrivilegeCount as usize,
+            )
+        };
+        entries.iter().map(|e| privilege_name(&e.Luid)).collect()
+    }
+
+    /// The user the token belongs to.
+    pub fn user_sid(&self) -> io::Result<Sid> {
+        let buf = self.information(TokenUser)?;
         // SAFETY: on success the buffer starts with a TOKEN_USER whose SID
         // points into the same buffer, which outlives this use.
         let sid = unsafe { (*buf.as_ptr().cast::<TOKEN_USER>()).User.Sid };
@@ -117,9 +196,52 @@ impl Token {
     }
 }
 
+/// A privilege's name from its local ID.
+fn privilege_name(luid: &LUID) -> io::Result<String> {
+    let mut name = [0u16; 64];
+    let mut len = name.len() as u32;
+    // SAFETY: `luid` is valid; `name` holds `len` UTF-16 units and `len` is
+    // a valid in/out pointer that receives the length written.
+    unsafe { LookupPrivilegeNameW(None, luid, Some(PWSTR(name.as_mut_ptr())), &mut len) }?;
+    Ok(String::from_utf16_lossy(
+        &name[..(len as usize).min(name.len())],
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn own_token_lists_change_notify() {
+        let privileges = own_token().unwrap().privileges().unwrap();
+        assert!(
+            privileges.iter().any(|p| p == "SeChangeNotifyPrivilege"),
+            "{privileges:?}"
+        );
+    }
+
+    #[test]
+    fn restricted_token_keeps_only_change_notify() {
+        // Every token holds more than one privilege, a normal user's too
+        // (SeShutdownPrivilege and others).
+        assert!(own_token().unwrap().privileges().unwrap().len() > 1);
+        let restricted = restricted_own_token().unwrap();
+        assert_eq!(
+            restricted.privileges().unwrap(),
+            ["SeChangeNotifyPrivilege"]
+        );
+        assert_eq!(restricted.user_sid().unwrap(), own_sid().unwrap());
+    }
+
+    #[test]
+    fn system_token_fails_cleanly_without_system() {
+        // Moving a token to another session needs SeTcbPrivilege, which a
+        // normal user lacks; as SYSTEM it succeeds. Either way, no panic.
+        if let Ok(t) = system_token(active_console_session().unwrap()) {
+            assert_eq!(t.privileges().unwrap(), ["SeChangeNotifyPrivilege"]);
+        }
+    }
 
     #[test]
     fn this_desktop_has_a_console_session() {

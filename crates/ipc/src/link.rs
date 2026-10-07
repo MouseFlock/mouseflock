@@ -23,7 +23,7 @@ use crate::clipboard::{self, Copied, MAX_TEXT_LEN, NotShared, RunAssembler};
 use crate::clock::ClockSync;
 use crate::message::{
     CLIPBOARD_CHUNK, CLIPBOARD_NOT_SHARED, CLIPBOARD_TEXT, ClipboardToAgent, Role, SET_CLIPBOARD,
-    SET_CLIPBOARD_CHUNK, ToAgent, ToAgentAny, ToService,
+    SET_CLIPBOARD_CHUNK, ToAgent, ToAgentAny, ToService, check_agent_role,
 };
 
 pub use common::{Closed, HANDSHAKE_TIMEOUT, LinkError, Stream};
@@ -41,6 +41,25 @@ pub const MAX_QUEUED: usize = 4_096;
 /// the link.
 pub const MAX_HELD: usize = 10_000;
 
+/// Which agent a link is for. Each end checks the other's `Hello` against
+/// it, and the service end checks the messages that only one kind may send.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AgentRole {
+    /// `deskhop-agent --session`: the user's desktop, with the clipboard.
+    Session,
+    /// `deskhop-agent --winlogon`: the secure desktop, without a clipboard.
+    Winlogon,
+}
+
+impl AgentRole {
+    pub const fn role(self) -> Role {
+        match self {
+            Self::Session => Role::SessionAgent,
+            Self::Winlogon => Role::WinlogonAgent,
+        }
+    }
+}
+
 // ---- service end ------------------------------------------------------------
 
 /// What the service learns from an agent, with times on the service's clock.
@@ -53,7 +72,24 @@ pub enum FromAgent {
     },
     Screen(Screen),
     /// A copy on the agent's desktop, once its whole run has arrived.
+    /// Session agent only.
     Clipboard(Copied),
+    /// Whether the agent's desktop is the input desktop. Winlogon agent only.
+    InputDesktop(bool),
+}
+
+/// Why clipboard text was not queued for an agent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SetClipboardError {
+    Closed,
+    /// A winlogon agent's link, which never carries the clipboard.
+    NoClipboard,
+}
+
+impl From<Closed> for SetClipboardError {
+    fn from(_: Closed) -> Self {
+        Self::Closed
+    }
 }
 
 /// What the service's writer sends: a command, or part of a clipboard run.
@@ -66,9 +102,15 @@ enum Outgoing {
 pub struct AgentHandle {
     tx: mpsc::UnboundedSender<Outgoing>,
     shared: Arc<Shared>,
+    role: AgentRole,
 }
 
 impl AgentHandle {
+    /// The kind of agent at the other end.
+    pub fn role(&self) -> AgentRole {
+        self.role
+    }
+
     /// Queues a command. Never waits; more than [`MAX_QUEUED`] unsent
     /// commands closes the link.
     pub fn send(&self, cmd: ToAgent) -> Result<(), Closed> {
@@ -77,8 +119,12 @@ impl AgentHandle {
 
     /// Queues `text` for the agent to put on the clipboard, as one run.
     /// Text over [`MAX_TEXT_LEN`] bytes is not sent. Each chunk counts
-    /// towards [`MAX_QUEUED`].
-    pub fn set_clipboard(&self, text: &str) -> Result<(), Closed> {
+    /// towards [`MAX_QUEUED`]. A winlogon agent's link refuses, sending
+    /// nothing.
+    pub fn set_clipboard(&self, text: &str) -> Result<(), SetClipboardError> {
+        if self.role != AgentRole::Session {
+            return Err(SetClipboardError::NoClipboard);
+        }
         let Some(len) = u32::try_from(text.len())
             .ok()
             .filter(|l| *l <= MAX_TEXT_LEN)
@@ -116,23 +162,23 @@ impl Drop for AgentHandle {
     }
 }
 
-/// The service's end of a session agent's link.
+/// The service's end of an agent's link.
 pub struct ServiceEnd;
 
 impl ServiceEnd {
-    /// Exchanges `Hello` with a session agent and starts the link. `clock`
-    /// is the service's monotonic clock; every event time is converted to
-    /// it.
+    /// Exchanges `Hello` with an agent of `role`, refusing any other role,
+    /// and starts the link. `clock` is the service's monotonic clock; every
+    /// event time is converted to it.
     pub async fn accept<S, C>(
         stream: S,
+        role: AgentRole,
         clock: C,
     ) -> Result<(AgentHandle, mpsc::UnboundedReceiver<FromAgent>), LinkError>
     where
         S: Stream,
         C: Fn() -> Millis + Send + Sync + 'static,
     {
-        let (version, reader, writer) =
-            handshake(stream, Role::Service, Role::SessionAgent).await?;
+        let (version, reader, writer) = handshake(stream, Role::Service, role.role()).await?;
         let shared = Shared::new();
         let clock: Arc<dyn Fn() -> Millis + Send + Sync> = Arc::new(clock);
         let sync = Arc::new(Mutex::new(ClockSync::default()));
@@ -147,12 +193,20 @@ impl ServiceEnd {
         tokio::spawn(service_reader(
             reader,
             version,
+            role,
             ev_tx,
             shared.clone(),
             sync,
             clock,
         ));
-        Ok((AgentHandle { tx: cmd_tx, shared }, ev_rx))
+        Ok((
+            AgentHandle {
+                tx: cmd_tx,
+                shared,
+                role,
+            },
+            ev_rx,
+        ))
     }
 }
 
@@ -197,6 +251,7 @@ enum Held {
     },
     Screen(Screen),
     Clipboard(Copied),
+    InputDesktop(bool),
 }
 
 /// Applies one clipboard message to the run in progress; a complete copy is
@@ -219,6 +274,7 @@ fn agent_clipboard(
 async fn service_reader<S: Stream>(
     mut reader: FrameReader<ReadHalf<S>>,
     version: u16,
+    role: AgentRole,
     events: mpsc::UnboundedSender<FromAgent>,
     shared: Arc<Shared>,
     sync: Arc<Mutex<ClockSync>>,
@@ -237,6 +293,9 @@ async fn service_reader<S: Stream>(
         let Ok(message) = ToService::decode(ty, &payload, version) else {
             break;
         };
+        if check_agent_role(ty, role.role()).is_err() {
+            break;
+        }
         let Ok(copied) = agent_clipboard(&mut runs, &message) else {
             break;
         };
@@ -254,6 +313,7 @@ async fn service_reader<S: Stream>(
                     held.push_back(Held::Clipboard(copied));
                 }
             }
+            ToService::InputDesktop(active) => held.push_back(Held::InputDesktop(active)),
         }
         if sync.ready() {
             while let Some(h) = held.pop_front() {
@@ -265,6 +325,7 @@ async fn service_reader<S: Stream>(
                     },
                     Held::Screen(s) => FromAgent::Screen(s),
                     Held::Clipboard(c) => FromAgent::Clipboard(c),
+                    Held::InputDesktop(active) => FromAgent::InputDesktop(active),
                 };
                 if events.send(event).is_err() {
                     shared.stop();
@@ -331,24 +392,25 @@ pub enum FromService {
     SetClipboard(String),
 }
 
-/// A session agent's end of its link.
+/// An agent's end of its link.
 pub struct AgentEnd;
 
 impl AgentEnd {
-    /// Exchanges `Hello` with the service and starts the link. `clock` is
-    /// the agent's monotonic clock, read when answering `Ping`. The returned
-    /// receiver yields `SetCapture`, `Inject`, `Warp` and complete
-    /// `SetClipboard` runs; `Ping` is answered here and never yielded.
+    /// Exchanges `Hello` with the service as an agent of `role` and starts
+    /// the link. `clock` is the agent's monotonic clock, read when answering
+    /// `Ping`. The returned receiver yields `SetCapture`, `Inject`, `Warp`
+    /// and complete `SetClipboard` runs; `Ping` is answered here and never
+    /// yielded.
     pub async fn connect<S, C>(
         stream: S,
+        role: AgentRole,
         clock: C,
     ) -> Result<(ServiceHandle, mpsc::UnboundedReceiver<FromService>), LinkError>
     where
         S: Stream,
         C: Fn() -> Millis + Send + Sync + 'static,
     {
-        let (version, reader, writer) =
-            handshake(stream, Role::SessionAgent, Role::Service).await?;
+        let (version, reader, writer) = handshake(stream, role.role(), Role::Service).await?;
         let shared = Shared::new();
         let (out_tx, out_rx) = mpsc::unbounded_channel();
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();

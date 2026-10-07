@@ -1,6 +1,8 @@
 //! The engine loop (add-service design D3): one task owns the engine and
-//! connects it to the session agent's link, the transport node, and every
-//! connected UI (add-ui-link design D4).
+//! connects it to the agents' links, the transport node, and every
+//! connected UI (add-ui-link design D4). Which agent carries input, the
+//! session agent or the winlogon agent on the secure desktop, is decided in
+//! [`routing`] (add-winlogon-agent design D8).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -8,7 +10,7 @@ use std::time::Duration;
 
 use engine::{CaptureMode, Decision, Engine, Event as EngineEvent, FocusView, Tuning};
 use ipc::clipboard::Copied;
-use ipc::link::{AgentHandle, FromAgent, UiHandle};
+use ipc::link::{AgentHandle, AgentRole, FromAgent, UiHandle};
 use ipc::message::ToAgent;
 use ipc::ui::{
     FocusOf, JoinFailedReason, Member, NotOpenedReason, Pairing, PairingClosedReason, Status,
@@ -22,9 +24,11 @@ use tokio::time::Instant;
 use transport::{Down, Event as NodeEvent, NoNetwork, NodeHandle, StartError};
 
 use crate::clipboard::{self, Tracker};
+use crate::launch;
 use crate::log::Log;
 use crate::store::{self, StoreHandle};
 use crate::{info, warn};
+use routing::{Effect, Routing};
 
 /// How long goodbye may take before sleep or stop.
 pub const GOODBYE_WAIT: Duration = Duration::from_secs(1);
@@ -51,13 +55,20 @@ impl Clock {
     }
 }
 
-/// A session agent's link, handed over by the supervisor. Dropping it ends
-/// the link; `ended` then tells the supervisor.
+/// An agent's link, handed over by its supervisor. Dropping it ends the
+/// link; `ended` then tells the supervisor.
 pub struct AgentLink {
     pub handle: AgentHandle,
     pub events: mpsc::UnboundedReceiver<FromAgent>,
     #[expect(dead_code, reason = "never sent on; dropping it is the signal")]
     pub ended: oneshot::Sender<()>,
+}
+
+impl AgentLink {
+    /// Which agent this link is for.
+    pub fn role(&self) -> AgentRole {
+        self.handle.role()
+    }
 }
 
 /// A UI's link, handed over by the UI pipe server.
@@ -91,8 +102,8 @@ pub enum HostCommand {
     /// The machine is going to sleep: say goodbye, then answer.
     Suspend(std::sync::mpsc::Sender<()>),
     Resume,
-    /// End the current agent link (its session ended or switched).
-    DropLink,
+    /// End this kind of agent's link (its session ended or switched).
+    DropLink(AgentRole),
     /// Goodbye, end the link, finish writes, stop the node; then answer.
     Stop(oneshot::Sender<()>),
 }
@@ -125,8 +136,8 @@ pub enum Report {
         side: Side,
         undo_secs: u64,
     },
-    AgentLinked,
-    AgentGone,
+    AgentLinked(AgentRole),
+    AgentGone(AgentRole),
 }
 
 /// How secure attention can be requested here (design D10).
@@ -185,7 +196,9 @@ pub fn start(
         my_name,
         desk,
         up: BTreeSet::new(),
-        link: None,
+        session: None,
+        winlogon: None,
+        routing: Routing::default(),
         store: config.store,
         log: config.log,
         sas: config.sas,
@@ -211,7 +224,12 @@ struct Host {
     /// A copy of the membership view, for names.
     desk: Desk,
     up: BTreeSet<PeerId>,
-    link: Option<AgentLink>,
+    /// The session agent's link.
+    session: Option<AgentLink>,
+    /// The winlogon agent's link.
+    winlogon: Option<AgentLink>,
+    /// Which agent is on the input desktop (secure-desktop spec).
+    routing: Routing,
     store: StoreHandle,
     log: Log,
     sas: Sas,
@@ -263,9 +281,13 @@ impl Host {
                     }
                 },
                 _ = status_tick.tick(), if self.dirty => self.send_status(),
-                event = next_from(&mut self.link) => match event {
-                    Some(event) => self.on_agent(event),
-                    None => self.link_ended("the agent link closed"),
+                event = next_from(&mut self.session) => match event {
+                    Some(event) => self.on_agent(AgentRole::Session, event),
+                    None => self.link_ended(AgentRole::Session, "its link closed"),
+                },
+                event = next_from(&mut self.winlogon) => match event {
+                    Some(event) => self.on_agent(AgentRole::Winlogon, event),
+                    None => self.link_ended(AgentRole::Winlogon, "its link closed"),
                 },
                 Some(link) = links.recv() => self.new_link(link),
                 command = commands.recv() => match command {
@@ -364,7 +386,7 @@ impl Host {
         Status {
             key: self.me.0,
             name: self.my_name.as_str().to_owned(),
-            agent_linked: self.link.is_some(),
+            agent_linked: self.session.is_some(),
             pairing,
             focus,
             members: self
@@ -443,37 +465,80 @@ impl Host {
 
     // ---- agent ----
 
+    fn slot(&mut self, role: AgentRole) -> &mut Option<AgentLink> {
+        match role {
+            AgentRole::Session => &mut self.session,
+            AgentRole::Winlogon => &mut self.winlogon,
+        }
+    }
+
     fn new_link(&mut self, link: AgentLink) {
-        if self.link.is_some() {
-            self.link_ended("replaced by a new agent link");
+        let role = link.role();
+        if self.slot(role).is_some() {
+            self.link_ended(role, "replaced by a new link");
         }
         let mode = mode_for(self.engine.focus());
         let _ = link.handle.send(ToAgent::SetCapture(mode));
-        self.link = Some(link);
+        *self.slot(role) = Some(link);
+        self.routing.linked(role);
         self.dirty = true;
-        info!(self.log, "agent linked");
-        self.report(Report::AgentLinked);
+        info!(self.log, "{} linked", launch::name(role));
+        self.report(Report::AgentLinked(role));
     }
 
-    fn link_ended(&mut self, why: &str) {
-        if self.link.take().is_none() {
+    fn link_ended(&mut self, role: AgentRole, why: &str) {
+        if self.slot(role).take().is_none() {
             return;
         }
         self.dirty = true;
-        info!(self.log, "agent link ended: {why}");
-        self.report(Report::AgentGone);
-        self.engine(EngineEvent::LocalInputLost);
+        info!(self.log, "{} link ended: {why}", launch::name(role));
+        self.report(Report::AgentGone(role));
+        let effects = self.routing.ended(role);
+        self.route(effects);
     }
 
-    fn on_agent(&mut self, event: FromAgent) {
+    /// Carries out what routing decided.
+    fn route(&mut self, effects: Vec<Effect>) {
+        for effect in effects {
+            match effect {
+                Effect::Screen(screen) => {
+                    info!(self.log, "screen: {} monitor(s)", screen.monitors.len());
+                    self.engine(EngineEvent::ScreenChanged(screen));
+                }
+                Effect::LocalInputLost => self.engine(EngineEvent::LocalInputLost),
+                Effect::Active {
+                    now: AgentRole::Winlogon,
+                    ..
+                } => info!(self.log, "secure desktop has the input"),
+                Effect::Active {
+                    now: AgentRole::Session,
+                    secure_inputs,
+                } => info!(
+                    self.log,
+                    "secure desktop no longer has the input; its agent reported {} input events",
+                    secure_inputs.unwrap_or(0)
+                ),
+            }
+        }
+    }
+
+    fn on_agent(&mut self, role: AgentRole, event: FromAgent) {
         match event {
             FromAgent::Input { at, input, origin } => {
-                self.engine(EngineEvent::Local { at, input, origin });
+                if self.routing.takes_input(role) {
+                    self.engine(EngineEvent::Local { at, input, origin });
+                }
             }
             FromAgent::Screen(screen) => {
-                info!(self.log, "screen: {} monitor(s)", screen.monitors.len());
-                self.engine(EngineEvent::ScreenChanged(screen));
+                let effects = self.routing.screen(role, screen);
+                self.route(effects);
             }
+            // Winlogon agent only; `ipc` enforces that.
+            FromAgent::InputDesktop(active) => {
+                let effects = self.routing.input_desktop(active);
+                self.route(effects);
+            }
+            // Session agent only; `ipc` enforces that.
             FromAgent::Clipboard(Copied::Text(text)) => {
                 let id = OsRng.next_u64();
                 info!(self.log, "clipboard: offered {} bytes", text.len());
@@ -520,7 +585,9 @@ impl Host {
                         text.len(),
                         self.name(peer)
                     );
-                    if let Some(link) = &self.link {
+                    // Only the session agent has a clipboard, even while
+                    // the secure desktop has the input.
+                    if let Some(link) = &self.session {
                         let _ = link.handle.set_clipboard(&text);
                     }
                 }
@@ -529,11 +596,25 @@ impl Host {
         }
     }
 
+    /// Sends injection and warps to the agent on the input desktop; dropped
+    /// while it has no link.
     fn to_agent(&self, command: ToAgent) {
-        if let Some(link) = &self.link {
+        let active = match self.routing.active() {
+            AgentRole::Session => &self.session,
+            AgentRole::Winlogon => &self.winlogon,
+        };
+        if let Some(link) = active {
             // A failed send means the link is closing; its end arrives as
             // `None` from the receiver.
             let _ = link.handle.send(command);
+        }
+    }
+
+    /// The capture mode goes to every linked agent, so physical input is
+    /// withheld or passed the same way on either desktop.
+    fn set_capture(&self, mode: CaptureMode) {
+        for link in [&self.session, &self.winlogon].into_iter().flatten() {
+            let _ = link.handle.send(ToAgent::SetCapture(mode));
         }
     }
 
@@ -542,7 +623,7 @@ impl Host {
     fn apply(&mut self, decisions: Vec<Decision>) {
         for decision in decisions {
             match decision {
-                Decision::SetCapture(mode) => self.to_agent(ToAgent::SetCapture(mode)),
+                Decision::SetCapture(mode) => self.set_capture(mode),
                 Decision::Inject(action) => self.to_agent(ToAgent::Inject(action)),
                 Decision::WarpCursor(to) => self.to_agent(ToAgent::Warp(to)),
                 Decision::Send { peer, msg } => self.node.send(peer, msg),
@@ -740,7 +821,7 @@ impl Host {
                 info!(self.log, "resumed: reconnecting");
                 self.node.resume();
             }
-            HostCommand::DropLink => self.link_ended("its session ended"),
+            HostCommand::DropLink(role) => self.link_ended(role, "its session ended"),
             // Handled in `run`, which ends the loop.
             HostCommand::Stop(_) => {}
         }
@@ -749,11 +830,14 @@ impl Host {
     async fn stop(&mut self) {
         info!(self.log, "stopping");
         let _ = tokio::time::timeout(GOODBYE_WAIT, self.node.goodbye()).await;
-        self.link_ended("the service is stopping");
+        self.link_ended(AgentRole::Session, "the service is stopping");
+        self.link_ended(AgentRole::Winlogon, "the service is stopping");
         self.store.flush().await;
         self.node.shutdown();
     }
 }
+
+mod routing;
 
 #[cfg(test)]
 mod tests;

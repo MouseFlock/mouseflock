@@ -1,5 +1,5 @@
-//! The real session agent against a test-created named pipe and the service
-//! end of the link (spec: agent-link).
+//! The real agent, of either kind, against a test-created named pipe and the
+//! service end of the link (spec: agent-link).
 //!
 //! `no_pipe_exits_nonzero` runs anywhere. The rest install real hooks and
 //! inject F24, so they need a logged-in desktop and never run by default:
@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use ipc::clipboard::Copied;
-use ipc::link::{AgentHandle, FromAgent, ServiceEnd};
+use ipc::link::{AgentHandle, AgentRole, FromAgent, ServiceEnd};
 use ipc::message::ToAgent;
 use model::{CaptureMode, InputAction, InputEvent, Key, Millis, Origin};
 use tokio::net::windows::named_pipe::ServerOptions;
@@ -43,10 +43,14 @@ impl Drop for Agent {
     }
 }
 
-fn agent(pipe: &str) -> Agent {
+fn agent(role: AgentRole, pipe: &str) -> Agent {
+    let kind = match role {
+        AgentRole::Session => "--session",
+        AgentRole::Winlogon => "--winlogon",
+    };
     Agent(
         Command::new(AGENT)
-            .args(["--session", "--pipe", pipe])
+            .args([kind, "--pipe", pipe])
             .spawn()
             .unwrap(),
     )
@@ -70,20 +74,26 @@ fn service_clock() -> Millis {
     Millis(start.elapsed().as_millis() as u64)
 }
 
-/// Starts an agent on a fresh pipe and accepts its link.
-async fn linked_agent() -> (Agent, AgentHandle, UnboundedReceiver<FromAgent>) {
+/// Starts an agent of `role` on a fresh pipe and accepts its link.
+async fn linked(role: AgentRole) -> (Agent, AgentHandle, UnboundedReceiver<FromAgent>) {
     let name = pipe_name();
     let server = ServerOptions::new()
         .first_pipe_instance(true)
         .create(&name)
         .unwrap();
-    let child = agent(&name);
+    let child = agent(role, &name);
     tokio::time::timeout(WAIT, server.connect())
         .await
         .unwrap()
         .unwrap();
-    let (handle, events) = ServiceEnd::accept(server, service_clock).await.unwrap();
+    let (handle, events) = ServiceEnd::accept(server, role, service_clock)
+        .await
+        .unwrap();
     (child, handle, events)
+}
+
+async fn linked_agent() -> (Agent, AgentHandle, UnboundedReceiver<FromAgent>) {
+    linked(AgentRole::Session).await
 }
 
 async fn next_matching(
@@ -104,9 +114,11 @@ async fn next_matching(
 
 #[test]
 fn no_pipe_exits_nonzero() {
-    let mut child = agent(&pipe_name());
-    let status = exits_within(&mut child, WAIT).expect("still running");
-    assert_eq!(status.code(), Some(3));
+    for role in [AgentRole::Session, AgentRole::Winlogon] {
+        let mut child = agent(role, &pipe_name());
+        let status = exits_within(&mut child, WAIT).expect("still running");
+        assert_eq!(status.code(), Some(3), "{role:?}");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -199,6 +211,75 @@ async fn clipboard_copy_is_reported_and_set_is_not() {
     })
     .await;
     assert!(echo.is_err(), "the agent reported its own write: {echo:?}");
+
+    drop(handle);
+    assert!(exits_within(&mut child, WAIT).is_some());
+}
+
+/// Every report that is not input, for `within`.
+async fn reports_for(
+    events: &mut UnboundedReceiver<FromAgent>,
+    within: Duration,
+) -> Vec<FromAgent> {
+    let end = tokio::time::Instant::now() + within;
+    let mut out = Vec::new();
+    while let Ok(Some(e)) = tokio::time::timeout_at(end, events.recv()).await {
+        if !matches!(e, FromAgent::Input { .. }) {
+            out.push(e);
+        }
+    }
+    out
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs a desktop"]
+async fn winlogon_reports_screen_then_input_desktop() {
+    // Started on the user's desktop, as here, its own desktop has the input.
+    let (mut child, handle, mut events) = linked(AgentRole::Winlogon).await;
+    let got = reports_for(&mut events, Duration::from_millis(800)).await;
+    assert!(
+        matches!(
+            got.as_slice(),
+            [FromAgent::Screen(_), FromAgent::InputDesktop(true)]
+        ),
+        "{got:?}"
+    );
+    drop(handle);
+    assert!(exits_within(&mut child, WAIT).is_some());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs a desktop"]
+async fn session_agent_sends_no_input_desktop() {
+    let (mut child, handle, mut events) = linked(AgentRole::Session).await;
+    let got = reports_for(&mut events, Duration::from_millis(800)).await;
+    assert!(matches!(got.as_slice(), [FromAgent::Screen(_)]), "{got:?}");
+    drop(handle);
+    assert!(exits_within(&mut child, WAIT).is_some());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs a desktop; replaces the clipboard"]
+async fn winlogon_ignores_copies() {
+    let (mut child, handle, mut events) = linked(AgentRole::Winlogon).await;
+    next_matching(&mut events, |e| matches!(e, FromAgent::InputDesktop(_))).await;
+
+    powershell("Set-Clipboard -Value 'deskhop winlogon'");
+    let copy = tokio::time::timeout(Duration::from_millis(600), async {
+        loop {
+            match events.recv().await {
+                Some(FromAgent::Clipboard(c)) => return Some(c),
+                Some(_) => {}
+                // A clipboard message would have closed the link.
+                None => return None,
+            }
+        }
+    })
+    .await;
+    assert!(
+        copy.is_err(),
+        "the winlogon agent reported a copy: {copy:?}"
+    );
 
     drop(handle);
     assert!(exits_within(&mut child, WAIT).is_some());

@@ -6,7 +6,7 @@ use std::net::Ipv4Addr;
 use std::path::PathBuf;
 
 use ipc::clipboard::NotShared;
-use ipc::link::{AgentEnd, FromService, ServiceEnd, ServiceHandle};
+use ipc::link::{AgentEnd, AgentRole, FromService, ServiceEnd, ServiceHandle};
 use ipc::message::ToService;
 use model::{InputAction, InputEvent, Key, Monitor, MonitorId, Origin, Point, Rect, Screen};
 use pairing::MachineName;
@@ -142,13 +142,22 @@ impl Pc {
         agent
     }
 
-    /// Links a fake agent that reports nothing yet.
+    /// Links a fake session agent that reports nothing yet.
     async fn bare_agent(&self) -> Agent {
+        self.bare_agent_of(AgentRole::Session).await
+    }
+
+    /// Links a fake winlogon agent that reports nothing yet.
+    async fn winlogon_agent(&self) -> Agent {
+        self.bare_agent_of(AgentRole::Winlogon).await
+    }
+
+    async fn bare_agent_of(&self, role: AgentRole) -> Agent {
         let (service_side, agent_side) = tokio::io::duplex(1 << 16);
         let clock = self.clock;
         let (service, agent) = tokio::join!(
-            ServiceEnd::accept(service_side, move || clock.now()),
-            AgentEnd::connect(agent_side, move || clock.now()),
+            ServiceEnd::accept(service_side, role, move || clock.now()),
+            AgentEnd::connect(agent_side, role, move || clock.now()),
         );
         let (handle, events) = service.unwrap();
         let (reports, commands) = agent.unwrap();
@@ -271,6 +280,27 @@ impl Agent {
                 FromService::Command(c) => self.seen.push(c),
             }
         }
+    }
+
+    /// Reports, as the winlogon agent does, whether its desktop has the
+    /// input.
+    fn input_desktop(&self, active: bool) {
+        self.reports.send(ToService::InputDesktop(active)).unwrap();
+    }
+
+    /// Fails if the service sends this agent a command `unwanted` within
+    /// `period`.
+    async fn none_for(&mut self, period: Duration, unwanted: impl Fn(&ToAgent) -> bool) {
+        let deadline = Instant::now() + period;
+        while let Some(c) = self.command_by(deadline).await {
+            assert!(!unwanted(&c), "unexpected {c:?}");
+        }
+    }
+
+    /// Waits for the link to end.
+    async fn closed(&mut self) {
+        let end = async { while self.commands.recv().await.is_some() {} };
+        timeout(WAIT, end).await.expect("the link stayed up");
     }
 
     async fn expect(&mut self, what: &str, want: impl Fn(&ToAgent) -> bool) -> ToAgent {
@@ -425,6 +455,35 @@ async fn new_link_gets_capture_mode_first() {
     assert_eq!(
         agent_b.next().await,
         ToAgent::SetCapture(CaptureMode::WithholdMouse)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn winlogon_agent_gets_every_capture_mode() {
+    let (a, b) = paired().await;
+    let mut agent_a = a.agent("A1").await;
+    let mut secure_a = a.winlogon_agent().await;
+    let _agent_b = b.agent("B1").await;
+    assert_eq!(
+        agent_a.next().await,
+        ToAgent::SetCapture(CaptureMode::PassAll)
+    );
+    assert_eq!(
+        secure_a.next().await,
+        ToAgent::SetCapture(CaptureMode::PassAll)
+    );
+    settle().await;
+    agent_a.push_right(5);
+    secure_a
+        .expect("withhold all", |c| {
+            *c == ToAgent::SetCapture(CaptureMode::WithholdAll)
+        })
+        .await;
+    // A winlogon agent that links while forwarding withholds all first.
+    let mut again = a.winlogon_agent().await;
+    assert_eq!(
+        again.next().await,
+        ToAgent::SetCapture(CaptureMode::WithholdAll)
     );
 }
 
@@ -1119,4 +1178,138 @@ async fn log_has_no_clipboard_text() {
     for line in &lines {
         assert!(!line.contains("zq-deskhop"), "{line}");
     }
+}
+
+// ---- secure desktop ---------------------------------------------------------
+
+const KEY_A: Key = Key(0x04);
+const KEY_B: Key = Key(0x05);
+
+fn key_down(key: Key) -> ToAgent {
+    ToAgent::Inject(InputAction::Key { key, down: true })
+}
+
+/// Links a winlogon agent to `pc` that reports `monitor` and that its
+/// desktop has the input, and returns it after its first command.
+async fn secure_desktop(pc: &Pc, monitor: &str, first: CaptureMode) -> Agent {
+    let mut agent = pc.winlogon_agent().await;
+    assert_eq!(agent.next().await, ToAgent::SetCapture(first));
+    agent.screen(monitor);
+    agent.input_desktop(true);
+    settle().await;
+    agent
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn typing_reaches_the_secure_desktop() {
+    let (_a, b, agent_a, mut agent_b) = forwarding().await;
+    let mut secure_b = secure_desktop(&b, "B1", CaptureMode::WithholdMouse).await;
+    agent_a.key(KEY_A, true);
+    secure_b
+        .expect("the key on B's secure desktop", |c| *c == key_down(KEY_A))
+        .await;
+    // Motion from the crossing may still be queued; no key reaches B's
+    // session agent.
+    agent_b
+        .none_for(Duration::from_millis(300), |c| {
+            matches!(c, ToAgent::Inject(InputAction::Key { .. }))
+        })
+        .await;
+
+    // The prompt is answered: keys reach B's session agent again.
+    secure_b.input_desktop(false);
+    settle().await;
+    agent_a.key(KEY_B, true);
+    agent_b
+        .expect("the key on B's desktop", |c| *c == key_down(KEY_B))
+        .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn forwarding_survives_a_uac_prompt_on_a() {
+    let (a, _b, agent_a, mut agent_b) = forwarding().await;
+    let secure_a = secure_desktop(&a, "A1", CaptureMode::WithholdAll).await;
+    secure_a.key(KEY_A, true);
+    agent_b
+        .expect("A's key from its secure desktop", |c| *c == key_down(KEY_A))
+        .await;
+    // A's session agent is not on the input desktop: its reports are
+    // dropped.
+    agent_a.key(KEY_B, true);
+    agent_b
+        .none_for(Duration::from_millis(300), |c| *c == key_down(KEY_B))
+        .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn losing_the_active_winlogon_agent_returns_focus() {
+    let (mut a, _b, _agent_a, mut agent_b) = forwarding().await;
+    let secure_a = secure_desktop(&a, "A1", CaptureMode::WithholdAll).await;
+    drop(secure_a);
+    a.expect("local", |r| {
+        matches!(
+            r,
+            Report::Focus {
+                focus: FocusView::Local,
+                ..
+            }
+        )
+    })
+    .await;
+    agent_b
+        .expect("pass all", |c| {
+            *c == ToAgent::SetCapture(CaptureMode::PassAll)
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn inactive_winlogon_agent_lost_changes_nothing() {
+    let (mut a, _b, agent_a, mut agent_b) = forwarding().await;
+    let mut secure_a = a.winlogon_agent().await;
+    assert_eq!(
+        secure_a.next().await,
+        ToAgent::SetCapture(CaptureMode::WithholdAll)
+    );
+    drop(secure_a);
+    a.expect("winlogon agent gone", |r| {
+        matches!(r, Report::AgentGone(AgentRole::Winlogon))
+    })
+    .await;
+    // Still forwarding: A's keys keep reaching B.
+    agent_a.key(KEY_A, true);
+    agent_b.expect("A's key", |c| *c == key_down(KEY_A)).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn arrival_at_a_locked_machine_sets_clipboard_via_session_agent() {
+    let (_a, b, mut agent_a, mut agent_b) = linked().await;
+    let mut secure_b = secure_desktop(&b, "B1", CaptureMode::PassAll).await;
+    agent_a.copy("deskhop copy for a locked B");
+    settle().await;
+    cross_to_b(&mut agent_a, &mut agent_b).await;
+    assert_eq!(agent_b.set_text().await, "deskhop copy for a locked B");
+    // The cursor entered B's secure desktop; no clipboard went there.
+    secure_b
+        .expect("the warp onto B's secure desktop", |c| {
+            matches!(c, ToAgent::Warp(_))
+        })
+        .await;
+    secure_b.no_set_for(Duration::from_millis(300)).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn stop_ends_both_agent_links() {
+    let a = pc("A", temp_dir("stop-both"));
+    let mut agent_a = a.agent("A1").await;
+    let mut secure_a = a.winlogon_agent().await;
+    for agent in [&mut agent_a, &mut secure_a] {
+        assert_eq!(
+            agent.next().await,
+            ToAgent::SetCapture(CaptureMode::PassAll)
+        );
+    }
+    a.stop().await;
+    agent_a.closed().await;
+    secure_a.closed().await;
 }

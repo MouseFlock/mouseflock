@@ -3,7 +3,7 @@
 
 use ipc::clipboard::{Copied, MAX_TEXT_LEN, NotShared};
 use ipc::frame::{self, Decoded};
-use ipc::link::{AgentEnd, FromAgent, FromService, ServiceEnd};
+use ipc::link::{AgentEnd, AgentRole, FromAgent, FromService, ServiceEnd};
 use ipc::message::{Hello, Role, ToService};
 use model::{InputEvent, Key, Millis, Origin};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
@@ -37,7 +37,9 @@ async fn raw_agent() -> (ipc::link::AgentHandle, UnboundedReceiver<FromAgent>, R
         .encode_frame(&mut out)
         .unwrap();
     raw.s.write_all(&out).await.unwrap();
-    let (handle, events) = ServiceEnd::accept(a, || Millis(0)).await.unwrap();
+    let (handle, events) = ServiceEnd::accept(a, AgentRole::Session, || Millis(0))
+        .await
+        .unwrap();
     // Read the service's Hello so its writer never blocks.
     let mut buf = Vec::new();
     while !matches!(frame::decode(&buf), Ok(Decoded::Frame { .. })) {
@@ -68,8 +70,8 @@ fn key(usage: u16) -> ToService {
 async fn copy_run_reaches_service() {
     let (a, b) = tokio::io::duplex(1 << 16);
     let (service, agent) = tokio::join!(
-        ServiceEnd::accept(a, || Millis(0)),
-        AgentEnd::connect(b, || Millis(0)),
+        ServiceEnd::accept(a, AgentRole::Session, || Millis(0)),
+        AgentEnd::connect(b, AgentRole::Session, || Millis(0)),
     );
     let ((_handle, mut events), (reports, _commands)) = (service.unwrap(), agent.unwrap());
     let big = "ü".repeat(100_000);
@@ -170,8 +172,8 @@ async fn invalid_utf8_closes_link() {
 async fn set_clipboard_reaches_agent() {
     let (a, b) = tokio::io::duplex(1 << 16);
     let (service, agent) = tokio::join!(
-        ServiceEnd::accept(a, || Millis(0)),
-        AgentEnd::connect(b, || Millis(0)),
+        ServiceEnd::accept(a, AgentRole::Session, || Millis(0)),
+        AgentEnd::connect(b, AgentRole::Session, || Millis(0)),
     );
     let ((handle, _events), (_reports, mut commands)) = (service.unwrap(), agent.unwrap());
     let big = "w\r\n".repeat(60_000);

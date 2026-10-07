@@ -1,6 +1,6 @@
 # DeskHop threat model
 
-*Status: covers the wire, pairing, desk membership, the LAN transport, forwarded input, the agent → service and UI → service pipes, the UI app, the clipboard, the service's data folder, console mode and secure attention. The secure desktop is filled in with its change.*
+*Status: covers the wire, pairing, desk membership, the LAN transport, forwarded input, the agent → service and UI → service pipes, the UI app, the clipboard, the service's data folder, console mode, secure attention and the secure desktop. Elevated windows on the user's desktop are a known gap, left to a later change.*
 
 DeskHop injects keystrokes received over the network, and its service runs as SYSTEM. This document records what it defends against and where.
 
@@ -8,7 +8,8 @@ DeskHop injects keystrokes received over the network, and its service runs as SY
 
 - Identity keys and the trust store (service).
 - Keystrokes and clipboard contents in transit, and copied text held in the service's memory.
-- The ability to inject input into a machine, including the secure desktop.
+- The ability to inject input into a machine, including its secure desktop: UAC prompts, the lock screen and the logon screen.
+- Keystrokes typed on the secure desktop, passwords included, while they pass through the winlogon agent and the service.
 
 ## Trust boundaries
 
@@ -16,7 +17,7 @@ DeskHop injects keystrokes received over the network, and its service runs as SY
 |---|---|---|
 | LAN → service | Any host on the network | Unauthenticated packets reach `proto` decoding as SYSTEM. |
 | Named pipe → service | Agents, UI | The service validates everything it receives (ADR 0002). See "Agent → service" and "UI → service". |
-| Service → winlogon agent | — | Agent runs as SYSTEM on the secure desktop. |
+| Winlogon agent → service | Winlogon agent | Runs as SYSTEM, with privileges removed, on the secure desktop. The service checks it like the session agent. See "Secure desktop (winlogon agent)". |
 
 ## Threats
 
@@ -85,7 +86,7 @@ Residual risk: a compromised member can push focus onto a machine whose layout m
 The session agent runs as the logged-in user and reports every key and mouse event to the SYSTEM service, which forwards physical input to peers. The service treats the agent as less trusted (ADR 0002). Specified in `openspec/specs/ipc-protocol/spec.md` and `openspec/specs/agent-link/spec.md`.
 
 - **Strict decoding, bounded memory.** IPC frames are capped at 65,536 bytes, checked from the header alone. Every payload has a fixed layout, except `Screen`, whose count, identity lengths, rectangles and DPI are all bounded. Decoding is under the same no-panic lints as `proto`, with a never-panic test and a nightly fuzz target (`decode_ipc`).
-- **Direction and role are checked.** An agent cannot send a service command, and the service end of an agent link accepts only the session-agent role.
+- **Direction and role are checked.** An agent cannot send a service command. The service end of an agent link accepts only the role of the agent it launched on that pipe. Clipboard messages are accepted only from the session agent, and `InputDesktop` only from the winlogon agent.
 - **A stalled or hostile agent cannot block the service.** The service reads into a buffer holding at most one frame. Sending a command never waits, and an agent that stops reading is cut off after 4,096 queued commands. Events waiting for the first clock exchange are capped at 10,000.
 - **The link ending releases input.** The agent returns capture to pass-all and removes its hooks when the link ends. If the agent dies, Windows removes its hooks. Input is never left withheld without a service.
 
@@ -164,3 +165,39 @@ Defenses for the data folder (`%ProgramData%\DeskHop`), specified in `openspec/s
 ### Secure attention (Ctrl-Alt-Del)
 
 A controlling peer can ask a machine to show its secure attention screen. The registered service calls `SendSAS` only if the `SoftwareSASGeneration` policy allows services (value 1 or 3), and logs it otherwise. The development script sets the policy to 1 when it is unset, as the installer will. `SendSAS` shows the Ctrl-Alt-Del screen and injects nothing. A member can already control the machine, so the request adds no power. Console mode cannot call it and logs that.
+
+### Secure desktop (winlogon agent)
+
+Windows shows UAC prompts, the lock screen and the logon screen on the secure desktop (`winsta0\Winlogon`), where the session agent's hooks see nothing and its injection reaches nothing. The service therefore runs a second agent there. Specified in `openspec/specs/session-agents/spec.md`, `openspec/specs/agent-link/spec.md` and `openspec/specs/secure-desktop/spec.md`.
+
+- **SYSTEM, with nothing extra.**
+  - The winlogon agent must run as SYSTEM: only SYSTEM can use the secure desktop, and UIPI lets it inject into `consent.exe` and `LogonUI` only at System integrity.
+  - Its token is the service's own, restricted (`CreateRestrictedToken` with `DISABLE_MAX_PRIVILEGE`) and moved to the console session. It keeps System integrity, but holds no privilege except `SeChangeNotifyPrivilege`, which every process has. The service logs the privileges at each launch.
+  - A process that takes it over gets no SeDebug, SeTcb, SeImpersonate or other SYSTEM privileges.
+- **The same pipe defenses as the session agent, narrower.**
+  - Each launch creates a new pipe with a 128-bit random name, as the first and only instance, refusing remote clients.
+  - Its ACL admits SYSTEM alone, so no user process can even try to connect, an elevated administrator's included.
+  - The service checks the client's process ID against the process it launched before reading a byte.
+- **Little to attack from the desktop.**
+  - The agent has no network, no clipboard and no files.
+  - Its hidden windows are on the secure desktop, where only SYSTEM processes such as `LogonUI` and `consent.exe` run.
+  - It is launched, like the service, from the service's own folder. The installer and the development script put that folder under Program Files, where only administrators can write. A service registered from a user-writable folder would already hand SYSTEM to that user, so the agent adds nothing to that risk.
+- **New power for a member.** A member controlling a machine can now:
+  - answer its UAC prompts, including a consent prompt that asks an administrator for no password;
+  - type at its lock and logon screens.
+
+  This is what a physical keyboard at that machine can do. DeskHop never learns a password except as keystrokes in transit, which are encrypted on QUIC and never logged.
+- **Local keystrokes on the secure desktop.**
+  - A password typed at the machine's own keyboard reaches the service the same way desktop keystrokes do, so the engine can tell local input from its own.
+  - It is never logged: the service logs only how many input events the agent reported while it had the input.
+  - It is forwarded only while this machine's focus is on another machine.
+- **Input follows the desktop that has it.**
+  - The service sends injection and warps only to the agent whose desktop is the input desktop, and takes input only from that agent.
+  - Both agents get every capture mode, so a UAC prompt or a lock never leaves physical input withheld on one desktop and passed on the other.
+  - If the active agent's link ends, the engine is told local input is lost and returns focus to this machine.
+- **No clipboard on the secure desktop.** The winlogon agent never watches or sets the clipboard. A clipboard message from it closes its link, and the service never sends it clipboard text.
+
+Residual risks:
+- A compromised member that controls a machine while a UAC consent prompt is up can approve it. Removing the member ends that.
+- A session switch ends the winlogon agent and launches a new one in the new console session, within a second or two. Until then, input cannot reach that session's secure desktop.
+- Elevated windows on the user's desktop run at high integrity. There the medium-integrity session agent cannot inject, and its hooks may not see input. This is unchanged by this change and left to a later one.
