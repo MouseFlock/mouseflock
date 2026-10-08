@@ -5,12 +5,15 @@ use std::fmt;
 use std::io;
 
 use windows::Win32::Foundation::{ERROR_NO_TOKEN, HANDLE, LUID};
-use windows::Win32::Security::Authorization::ConvertSidToStringSidW;
+use windows::Win32::Security::Authorization::{ConvertSidToStringSidW, ConvertStringSidToSidW};
 use windows::Win32::Security::{
-    CreateRestrictedToken, DISABLE_MAX_PRIVILEGE, GetTokenInformation, LUID_AND_ATTRIBUTES,
-    LookupPrivilegeNameW, SetTokenInformation, TOKEN_ACCESS_MASK, TOKEN_ADJUST_DEFAULT,
-    TOKEN_ADJUST_SESSIONID, TOKEN_ASSIGN_PRIMARY, TOKEN_DUPLICATE, TOKEN_INFORMATION_CLASS,
-    TOKEN_PRIVILEGES, TOKEN_QUERY, TOKEN_USER, TokenPrivileges, TokenSessionId, TokenUser,
+    CreateRestrictedToken, DISABLE_MAX_PRIVILEGE, DuplicateTokenEx, GetLengthSid,
+    GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation, LUID_AND_ATTRIBUTES,
+    LookupPrivilegeNameW, SID_AND_ATTRIBUTES, SecurityImpersonation, SetTokenInformation,
+    TOKEN_ACCESS_MASK, TOKEN_ADJUST_DEFAULT, TOKEN_ADJUST_SESSIONID, TOKEN_ASSIGN_PRIMARY,
+    TOKEN_DUPLICATE, TOKEN_INFORMATION_CLASS, TOKEN_MANDATORY_LABEL, TOKEN_PRIVILEGES, TOKEN_QUERY,
+    TOKEN_USER, TokenIntegrityLevel, TokenPrimary, TokenPrivileges, TokenSessionId, TokenUIAccess,
+    TokenUser,
 };
 use windows::Win32::System::RemoteDesktop::{WTSGetActiveConsoleSessionId, WTSQueryUserToken};
 use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
@@ -137,6 +140,61 @@ pub fn own_sid() -> io::Result<Sid> {
     own_token()?.user_sid()
 }
 
+/// The integrity level one step above medium, "Medium Plus" (RID `0x2100`).
+/// The session agent runs here so the user's own unelevated programs sit
+/// below it (add-elevated-windows D3).
+const MEDIUM_PLUS: &str = "S-1-16-8448";
+
+/// Which step of [`ui_access_token`] failed, so the caller can log it and
+/// fall back to a plain launch.
+#[derive(Debug)]
+pub enum UiAccessError {
+    /// No user is logged on to the session.
+    NoUser,
+    /// Copying the user's token failed.
+    Duplicate(io::Error),
+    /// Raising the copy to Medium Plus integrity failed.
+    Integrity(io::Error),
+    /// Granting UI access failed. Without SYSTEM's `SeTcbPrivilege` this is
+    /// where it stops.
+    UiAccess(io::Error),
+}
+
+impl fmt::Display for UiAccessError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NoUser => f.write_str("no user is logged on"),
+            Self::Duplicate(e) => write!(f, "cannot copy the user's token: {e}"),
+            Self::Integrity(e) => write!(f, "cannot raise the token's integrity: {e}"),
+            Self::UiAccess(e) => write!(f, "cannot grant UI access (needs SeTcbPrivilege): {e}"),
+        }
+    }
+}
+
+impl std::error::Error for UiAccessError {}
+
+/// The session agent's token: the logged-on user's own token, copied, raised
+/// to Medium Plus integrity, then granted UI access, so the agent can drive
+/// the user's elevated windows the way an on-screen keyboard or screen reader
+/// does (add-elevated-windows D2). The agent still runs as the user and gains
+/// no privilege; UI access is a token flag, not a right to act as anyone else.
+///
+/// Integrity is raised before UI access, so a failure never leaves a
+/// UI-access token at the wrong level in use. Granting UI access needs
+/// SYSTEM's `SeTcbPrivilege`, so this works only in the registered service.
+pub fn ui_access_token(session: SessionId) -> Result<Token, UiAccessError> {
+    let user = user_token(session).map_err(|e| match e {
+        TokenError::NoUser => UiAccessError::NoUser,
+        TokenError::Os(e) => UiAccessError::Duplicate(e),
+    })?;
+    let token = user.duplicate_primary().map_err(UiAccessError::Duplicate)?;
+    token
+        .set_integrity(MEDIUM_PLUS)
+        .map_err(UiAccessError::Integrity)?;
+    token.set_ui_access().map_err(UiAccessError::UiAccess)?;
+    Ok(token)
+}
+
 impl Token {
     pub(crate) fn handle(&self) -> HANDLE {
         self.0.0
@@ -179,6 +237,109 @@ impl Token {
         entries.iter().map(|e| privilege_name(&e.Luid)).collect()
     }
 
+    /// A primary copy of this token, opened for the access the agent launch
+    /// and the adjustments below need.
+    fn duplicate_primary(&self) -> io::Result<Token> {
+        let access = TOKEN_ASSIGN_PRIMARY
+            | TOKEN_DUPLICATE
+            | TOKEN_QUERY
+            | TOKEN_ADJUST_DEFAULT
+            | TOKEN_ADJUST_SESSIONID;
+        let mut copy = HANDLE::default();
+        // SAFETY: `self` is open; no attributes are passed; `copy` is a valid
+        // out-pointer whose handle this function then owns.
+        unsafe {
+            DuplicateTokenEx(
+                self.handle(),
+                access,
+                None,
+                SecurityImpersonation,
+                TokenPrimary,
+                &mut copy,
+            )
+        }?;
+        Ok(Token(Owned(copy)))
+    }
+
+    /// Sets the token's integrity level to the one named by `sid` (an
+    /// `S-1-16-*` string), such as [`MEDIUM_PLUS`].
+    fn set_integrity(&self, sid: &str) -> io::Result<()> {
+        let wide: Vec<u16> = sid.encode_utf16().chain(std::iter::once(0)).collect();
+        let mut psid = windows::Win32::Security::PSID::default();
+        // SAFETY: `wide` is NUL-terminated and outlives the call; `psid`
+        // receives LocalAlloc memory that `Local` frees below.
+        unsafe { ConvertStringSidToSidW(windows::core::PCWSTR(wide.as_ptr()), &mut psid) }?;
+        let _free = Local(psid.0);
+        // SE_GROUP_INTEGRITY, marking this SID as the integrity level.
+        const SE_GROUP_INTEGRITY: u32 = 0x0000_0020;
+        let label = TOKEN_MANDATORY_LABEL {
+            Label: SID_AND_ATTRIBUTES {
+                Sid: psid,
+                Attributes: SE_GROUP_INTEGRITY,
+            },
+        };
+        // SAFETY: `psid` is a valid SID for the length below; the buffer is
+        // the TOKEN_MANDATORY_LABEL `label`, whose SID pointer stays valid
+        // for the call; the length covers the struct and the SID.
+        let len = size_of::<TOKEN_MANDATORY_LABEL>() as u32 + unsafe { GetLengthSid(psid) };
+        // SAFETY: as above; the handle is open with TOKEN_ADJUST_DEFAULT.
+        unsafe {
+            SetTokenInformation(
+                self.handle(),
+                TokenIntegrityLevel,
+                (&raw const label).cast(),
+                len,
+            )
+        }?;
+        Ok(())
+    }
+
+    /// Grants the token UI access, the flag accessibility software carries so
+    /// it may work with higher-integrity windows. Needs `SeTcbPrivilege`.
+    fn set_ui_access(&self) -> io::Result<()> {
+        let on: u32 = 1;
+        // SAFETY: the handle is open with TOKEN_ADJUST_DEFAULT; the buffer is
+        // the u32 `TokenUIAccess` expects and outlives the call.
+        unsafe {
+            SetTokenInformation(
+                self.handle(),
+                TokenUIAccess,
+                (&raw const on).cast(),
+                size_of::<u32>() as u32,
+            )
+        }?;
+        Ok(())
+    }
+
+    /// Whether the token has UI access set, read from `TokenUIAccess`
+    /// (add-elevated-windows D5). A medium-integrity process with this set
+    /// may drive the user's higher-integrity windows, as accessibility tools
+    /// do; the service grants it to the session agent.
+    pub fn ui_access(&self) -> io::Result<bool> {
+        // TokenUIAccess is a single DWORD, which fits the first u64 element.
+        let buf = self.information(TokenUIAccess)?;
+        Ok(buf[0] as u32 != 0)
+    }
+
+    /// The RID of the token's integrity level, read from
+    /// `TokenIntegrityLevel`: for example `0x2000` medium, `0x2100` medium
+    /// plus, `0x3000` high (add-elevated-windows D5). The RID is the last
+    /// subauthority of the integrity SID.
+    pub fn integrity(&self) -> io::Result<u32> {
+        let buf = self.information(TokenIntegrityLevel)?;
+        // SAFETY: on success the buffer starts with a TOKEN_MANDATORY_LABEL
+        // whose `Label.Sid` points into the same buffer, which outlives this
+        // use. A mandatory-label SID always has at least one subauthority.
+        unsafe {
+            let sid = (*buf.as_ptr().cast::<TOKEN_MANDATORY_LABEL>()).Label.Sid;
+            let count = *GetSidSubAuthorityCount(sid);
+            if count == 0 {
+                return Err(io::Error::other("integrity SID has no subauthority"));
+            }
+            Ok(*GetSidSubAuthority(sid, u32::from(count) - 1))
+        }
+    }
+
     /// The user the token belongs to.
     pub fn user_sid(&self) -> io::Result<Sid> {
         let buf = self.information(TokenUser)?;
@@ -211,6 +372,77 @@ fn privilege_name(luid: &LUID) -> io::Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ui_access_error_names_the_step() {
+        let denied = || io::Error::from_raw_os_error(5);
+        assert!(
+            UiAccessError::Integrity(denied())
+                .to_string()
+                .contains("integrity")
+        );
+        assert!(
+            UiAccessError::UiAccess(denied())
+                .to_string()
+                .contains("UI access")
+        );
+        assert!(UiAccessError::NoUser.to_string().contains("no user"));
+    }
+
+    #[test]
+    fn ui_access_token_fails_cleanly_without_system() {
+        // Granting UI access needs SYSTEM's SeTcbPrivilege, which the test
+        // process lacks; as SYSTEM it may succeed. Either way it returns the
+        // failed step rather than panicking.
+        match ui_access_token(active_console_session().unwrap()) {
+            Ok(t) => {
+                assert!(t.ui_access().unwrap());
+                assert_eq!(t.integrity().unwrap(), 0x2100);
+            }
+            Err(e) => {
+                // A normal user cannot even read another session's token, and
+                // an administrator stops at the UI-access step.
+                assert!(
+                    matches!(
+                        e,
+                        UiAccessError::NoUser
+                            | UiAccessError::Duplicate(_)
+                            | UiAccessError::UiAccess(_)
+                    ),
+                    "{e:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn integrity_can_be_lowered_on_a_copy_of_our_own_token() {
+        // Lowering a token's integrity needs no privilege, so this exercises
+        // set_integrity and integrity() together without SYSTEM. (Raising it
+        // above our own level, as the service does to the user's token, needs
+        // SYSTEM's privilege and is checked by hand.) Low reads back as
+        // 0x1000.
+        let token = open_own_token(TOKEN_DUPLICATE | TOKEN_QUERY)
+            .unwrap()
+            .duplicate_primary()
+            .expect("duplicate own token");
+        token.set_integrity("S-1-16-4096").expect("set integrity");
+        assert_eq!(token.integrity().unwrap(), 0x1000);
+    }
+
+    #[test]
+    fn own_token_has_no_ui_access_and_a_plausible_integrity() {
+        let token = own_token().unwrap();
+        // The test process is not a UI-access process.
+        assert!(!token.ui_access().unwrap());
+        // Medium (0x2000) when run normally, high (0x3000) when elevated;
+        // either way a known integrity RID, never zero.
+        let integrity = token.integrity().unwrap();
+        assert!(
+            [0x1000, 0x2000, 0x3000, 0x4000].contains(&integrity),
+            "unexpected integrity {integrity:#06x}"
+        );
+    }
 
     #[test]
     fn own_token_lists_change_notify() {

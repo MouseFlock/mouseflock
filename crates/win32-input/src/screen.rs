@@ -29,8 +29,9 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Registry::{KEY_READ, RegCloseKey, RegQueryValueExW};
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::WindowsAndMessaging::{
-    DefWindowProcW, DestroyWindow, RegisterClassW, SetTimer, WM_DEVICECHANGE, WM_DISPLAYCHANGE,
-    WM_DPICHANGED, WM_SETTINGCHANGE, WM_TIMER, WNDCLASSW,
+    ChangeWindowMessageFilterEx, DefWindowProcW, DestroyWindow, MSGFLT_ALLOW, RegisterClassW,
+    SetTimer, WM_DEVICECHANGE, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_SETTINGCHANGE, WM_TIMER,
+    WNDCLASSW,
 };
 use windows::core::{BOOL, PCWSTR, w};
 
@@ -98,6 +99,15 @@ pub(crate) fn thread(tx: Sender<Captured>, ready: Ready, report_desktop: bool) {
             return;
         }
     };
+    // When the agent runs at raised integrity (UI access), UIPI drops a
+    // WM_SETTINGCHANGE that an unelevated process broadcasts, such as
+    // Settings after a scaling change, so allow that one message through. It
+    // is a no-op at medium integrity (add-elevated-windows D3).
+    // SAFETY: the window belongs to this thread; a plain message id and flag,
+    // no filter struct.
+    unsafe {
+        let _ = ChangeWindowMessageFilterEx(hwnd, WM_SETTINGCHANGE, MSGFLT_ALLOW, None);
+    }
     // SAFETY: the window belongs to this thread; no callback is used.
     unsafe { SetTimer(Some(hwnd), SCREEN_TIMER, RECHECK_MS, None) };
     if report_desktop {
