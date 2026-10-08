@@ -50,7 +50,9 @@
 ## 4. Checking (`installer/test.ps1`, CI)
 
 - [x] 4.1 Write `installer/test.ps1 -Msi <path> -UpgradeMsi <path> [-Setup <exe>]` with the install, upgrade and uninstall checks from D9, plus the setup program's install and uninstall. Verify with the user, in an elevated PowerShell on this PC with the dev service uninstalled, that it passes against the x64 MSIs and setup program.
-- [ ] 4.2 Add the CI `installer` job (D9): it builds both MSIs and setup programs, uploads them as artifacts, and runs `test.ps1` against x64. Verify on a pull request that the job passes and the artifacts are attached.
+- [x] 4.2 Add the CI `installer` job (D9): it builds both MSIs and setup programs, uploads them as artifacts, and runs `test.ps1` against x64. Verify on a pull request that the job passes and the artifacts are attached.
+
+  Done: on PR commit `84b89e2` the `installer` job passed, building both architectures and running `test.ps1` against x64, and attached the `installer` artifact (26 MB).
 - [x] 4.3 Make `tools\dev\service.ps1 install` refuse while DeskHop is installed (D8). Verify with the user:
   - with DeskHop installed, the dev install refuses and changes nothing;
   - with the dev service registered, the setup program refuses with the D8 message.
@@ -62,13 +64,15 @@
 
 ## 6. Integration
 
-- [ ] 6.1 Run the full checks, and verify that each passes:
+- [x] 6.1 Run the full checks, and verify that each passes:
   - `cargo fmt --all --check`, `cargo archcheck`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`;
   - the Linux set;
   - the ARM64 check;
   - `npm test`;
   - the ignored desktop tests in `deskhop-service`;
   - the CI run of the `installer` job.
+
+  Done: the local checks passed before the commit, and on PR commit `84b89e2` CI's `linux`, `windows` and `installer` jobs all passed.
 - [x] 6.2 Manual check with the user on this PC, with the x64 setup program:
   - **Install:** run the setup program. Expect one consent prompt, progress, then success with **Launch**. **Launch** opens the tray app on *Add a PC*, at medium integrity (Task Manager's *Elevated* column says No).
   - **Running:** the service log shows both agents linked, and Win+L and unlock still switch the secure desktop.
