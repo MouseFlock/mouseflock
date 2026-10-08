@@ -3,13 +3,50 @@
 //!
 //! [`TransferReader`] checks a clipboard stream's order and lengths and lends
 //! each chunk's bytes back; like every decoder here it buffers nothing, so the
-//! caller owns the text it collects and can bound it by [`MAX_TEXT_LEN`].
+//! caller owns the bytes it collects and can bound them by the kind's limit.
+//!
+//! A stream carries text (`ClipboardData`, version 1) or an image as one PNG
+//! (`ClipboardImageData`, version 2). An image's bytes are never decoded here:
+//! only its length and its first eight bytes, the PNG signature, are checked.
 
 use crate::codec::fixed_payload;
 use crate::{EncodeError, ProtocolError, frame, registry};
 
 /// Most bytes of UTF-8 text one transfer may carry (4 MiB).
 pub const MAX_TEXT_LEN: u32 = 4_194_304;
+
+/// Most bytes of PNG one image transfer may carry (32 MiB).
+pub const MAX_IMAGE_LEN: u32 = 33_554_432;
+
+/// The first eight bytes of every PNG file.
+pub const PNG_SIGNATURE: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+
+/// What a clipboard transfer carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ClipKind {
+    /// UTF-8 text, at most [`MAX_TEXT_LEN`] bytes.
+    Text,
+    /// One PNG file, at most [`MAX_IMAGE_LEN`] bytes. Protocol version 2.
+    Image,
+}
+
+impl ClipKind {
+    /// The most bytes a transfer of this kind may carry.
+    pub const fn max_len(self) -> u32 {
+        match self {
+            Self::Text => MAX_TEXT_LEN,
+            Self::Image => MAX_IMAGE_LEN,
+        }
+    }
+
+    /// The protocol version that introduced this kind.
+    pub const fn since(self) -> u16 {
+        match self {
+            Self::Text => 1,
+            Self::Image => 2,
+        }
+    }
+}
 
 /// Bytes in a `ClipboardData` payload: id u64, len u32.
 const DATA_LEN: usize = 12;
@@ -58,14 +95,38 @@ impl ClipboardMessage {
     }
 }
 
-/// Appends a clipboard stream's first frame: `ClipboardData` with `id` and the
-/// text's length.
+/// Appends a text clipboard stream's first frame: `ClipboardData` with `id`
+/// and the text's length.
 pub fn encode_data(id: u64, len: u32, out: &mut Vec<u8>) -> Result<(), EncodeError> {
+    encode_header(registry::CLIPBOARD_DATA, id, len, out)
+}
+
+/// Appends an image clipboard stream's first frame: `ClipboardImageData`
+/// with `id` and the PNG's length. Only for a connection at version 2 or
+/// later.
+pub fn encode_image_data(id: u64, len: u32, out: &mut Vec<u8>) -> Result<(), EncodeError> {
+    encode_header(registry::CLIPBOARD_IMAGE_DATA, id, len, out)
+}
+
+/// Appends the header frame for a transfer of `kind`.
+pub fn encode_header_for(
+    kind: ClipKind,
+    id: u64,
+    len: u32,
+    out: &mut Vec<u8>,
+) -> Result<(), EncodeError> {
+    match kind {
+        ClipKind::Text => encode_data(id, len, out),
+        ClipKind::Image => encode_image_data(id, len, out),
+    }
+}
+
+fn encode_header(ty: u16, id: u64, len: u32, out: &mut Vec<u8>) -> Result<(), EncodeError> {
     let mut payload = [0u8; DATA_LEN];
     let (id_bytes, len_bytes) = payload.split_at_mut(8);
     id_bytes.copy_from_slice(&id.to_le_bytes());
     len_bytes.copy_from_slice(&len.to_le_bytes());
-    frame::encode(registry::CLIPBOARD_DATA, &payload, out)
+    frame::encode(ty, &payload, out)
 }
 
 /// Appends one `ClipboardChunk` frame. `bytes` must be 1 to
@@ -80,37 +141,41 @@ pub fn encode_chunk(bytes: &[u8], out: &mut Vec<u8>) -> Result<(), EncodeError> 
 /// What one clipboard-stream frame contributed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TransferStep<'a> {
-    /// The transfer's header: which copy, and how many bytes follow.
-    Started { id: u64, len: u32 },
-    /// More of the text.
+    /// The transfer's header: which copy, what it carries, and how many bytes
+    /// follow.
+    Started { id: u64, kind: ClipKind, len: u32 },
+    /// More of the copy's bytes.
     Chunk(&'a [u8]),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum State {
     AwaitingData,
-    Body { remaining: u32 },
+    /// `signed` counts the leading bytes already checked against the PNG
+    /// signature; text starts at 8, so nothing is checked.
+    Body {
+        remaining: u32,
+        signed: usize,
+    },
     Failed,
 }
 
-/// Checks the frames of one clipboard stream: exactly one `ClipboardData`
-/// first, then non-empty chunks totalling exactly its length, at most
-/// [`MAX_TEXT_LEN`].
+/// Checks the frames of one clipboard stream: exactly one header first
+/// (`ClipboardData`, or from version 2 `ClipboardImageData`), then non-empty
+/// chunks totalling exactly its length, within the kind's limit. An image's
+/// first eight bytes must be the PNG signature, wherever the chunks split.
 #[derive(Debug, Clone)]
 pub struct TransferReader {
     state: State,
-}
-
-impl Default for TransferReader {
-    fn default() -> Self {
-        Self::new()
-    }
+    version: u16,
 }
 
 impl TransferReader {
-    pub const fn new() -> Self {
+    /// A reader for a stream on a connection that agreed `version`.
+    pub const fn new(version: u16) -> Self {
         Self {
             state: State::AwaitingData,
+            version,
         }
     }
 
@@ -130,40 +195,77 @@ impl TransferReader {
     fn step<'a>(&mut self, ty: u16, payload: &'a [u8]) -> Result<TransferStep<'a>, ProtocolError> {
         match (self.state, ty) {
             (State::Failed, _) => Err(ProtocolError::SessionFailed),
-            (State::AwaitingData, registry::CLIPBOARD_DATA) => {
+            (State::AwaitingData, registry::CLIPBOARD_DATA | registry::CLIPBOARD_IMAGE_DATA) => {
+                let kind = if ty == registry::CLIPBOARD_DATA {
+                    ClipKind::Text
+                } else {
+                    ClipKind::Image
+                };
+                if self.version < kind.since() {
+                    return Err(ProtocolError::UnknownType { ty });
+                }
                 let p = fixed_payload::<DATA_LEN>(ty, payload)?;
                 let (Some(id), Some(len)) = (p.first_chunk::<8>(), p.last_chunk::<4>()) else {
                     return Err(short(ty, payload));
                 };
                 let (id, len) = (u64::from_le_bytes(*id), u32::from_le_bytes(*len));
-                if len > MAX_TEXT_LEN {
-                    return Err(ProtocolError::TextTooLong { len });
-                }
-                self.state = State::Body { remaining: len };
-                Ok(TransferStep::Started { id, len })
+                let signed = match kind {
+                    ClipKind::Text if len > MAX_TEXT_LEN => {
+                        return Err(ProtocolError::TextTooLong { len });
+                    }
+                    ClipKind::Text => PNG_SIGNATURE.len(),
+                    ClipKind::Image if len > MAX_IMAGE_LEN => {
+                        return Err(ProtocolError::ImageTooLong { len });
+                    }
+                    // Too short to hold the signature, so it cannot be a PNG.
+                    ClipKind::Image if (len as usize) < PNG_SIGNATURE.len() => {
+                        return Err(ProtocolError::NotPng);
+                    }
+                    ClipKind::Image => 0,
+                };
+                self.state = State::Body {
+                    remaining: len,
+                    signed,
+                };
+                Ok(TransferStep::Started { id, kind, len })
             }
-            (State::Body { remaining }, registry::CLIPBOARD_CHUNK) => {
+            (State::Body { remaining, signed }, registry::CLIPBOARD_CHUNK) => {
                 if payload.is_empty() {
                     return Err(ProtocolError::EmptyChunk);
                 }
                 let n = u32::try_from(payload.len()).map_err(|_| ProtocolError::TextOverrun)?;
                 let remaining = remaining.checked_sub(n).ok_or(ProtocolError::TextOverrun)?;
-                self.state = State::Body { remaining };
+                let signed = check_signature(signed, payload)?;
+                self.state = State::Body { remaining, signed };
                 Ok(TransferStep::Chunk(payload))
             }
             _ => Err(ProtocolError::TransferOrder { ty }),
         }
     }
 
-    /// Called when the stream ends: the text must be complete.
+    /// Called when the stream ends: the copy must be complete.
     pub fn finish(&self) -> Result<(), ProtocolError> {
         match self.state {
-            State::Body { remaining: 0 } => Ok(()),
-            State::Body { remaining } => Err(ProtocolError::TextIncomplete { remaining }),
+            State::Body { remaining: 0, .. } => Ok(()),
+            State::Body { remaining, .. } => Err(ProtocolError::TextIncomplete { remaining }),
             State::AwaitingData => Err(ProtocolError::TextIncomplete { remaining: 0 }),
             State::Failed => Err(ProtocolError::SessionFailed),
         }
     }
+}
+
+/// Checks the part of `chunk` that falls within the PNG signature, given that
+/// `signed` leading bytes were already checked; returns the new count.
+fn check_signature(signed: usize, chunk: &[u8]) -> Result<usize, ProtocolError> {
+    let Some(expected) = PNG_SIGNATURE.get(signed..) else {
+        return Ok(signed);
+    };
+    let n = expected.len().min(chunk.len());
+    if chunk.get(..n) != expected.get(..n) {
+        return Err(ProtocolError::NotPng);
+    }
+    // `n` is at most the signature's remaining length, so this stays ≤ 8.
+    Ok(signed.saturating_add(n))
 }
 
 fn short(ty: u16, payload: &[u8]) -> ProtocolError {
@@ -186,7 +288,7 @@ mod tests {
 
     /// Feeds encoded frames through a reader, collecting the text.
     fn read(bytes: &[u8]) -> Result<(u64, Vec<u8>), ProtocolError> {
-        let mut reader = TransferReader::new();
+        let mut reader = TransferReader::new(2);
         let mut rest = bytes;
         let mut id = None;
         let mut text = Vec::new();
@@ -208,6 +310,126 @@ mod tests {
             encode_chunk(chunk, &mut out).unwrap();
         }
         out
+    }
+
+    /// Like `read`, at a given version, also reporting the kind.
+    fn read_at(version: u16, bytes: &[u8]) -> Result<(u64, ClipKind, Vec<u8>), ProtocolError> {
+        let mut reader = TransferReader::new(version);
+        let mut rest = bytes;
+        let mut head = None;
+        let mut body = Vec::new();
+        while let Decoded::Frame { frame, consumed } = decode(rest)? {
+            match reader.on_message(frame.ty, frame.payload)? {
+                TransferStep::Started { id, kind, .. } => head = Some((id, kind)),
+                TransferStep::Chunk(c) => body.extend_from_slice(c),
+            }
+            rest = &rest[consumed..];
+        }
+        reader.finish()?;
+        let (id, kind) = head.expect("a header");
+        Ok((id, kind, body))
+    }
+
+    /// An image stream carrying `bytes`, split into chunks of `chunk` bytes.
+    fn image_transfer(id: u64, bytes: &[u8], chunk: usize) -> Vec<u8> {
+        let mut out = Vec::new();
+        encode_image_data(id, u32::try_from(bytes.len()).unwrap(), &mut out).unwrap();
+        for piece in bytes.chunks(chunk) {
+            encode_chunk(piece, &mut out).unwrap();
+        }
+        out
+    }
+
+    /// `len` bytes that start with the PNG signature.
+    fn png_like(len: usize) -> Vec<u8> {
+        let mut bytes = vec![0x42; len];
+        bytes[..8].copy_from_slice(&PNG_SIGNATURE);
+        bytes
+    }
+
+    #[test]
+    fn image_round_trips_at_version_2() {
+        let png = png_like(100_000);
+        assert_eq!(
+            read_at(2, &image_transfer(9, &png, frame::MAX_FRAME_PAYLOAD)),
+            Ok((9, ClipKind::Image, png))
+        );
+    }
+
+    #[test]
+    fn image_of_exactly_the_limit_is_accepted() {
+        let png = png_like(MAX_IMAGE_LEN as usize);
+        let (_, kind, body) =
+            read_at(2, &image_transfer(1, &png, frame::MAX_FRAME_PAYLOAD)).unwrap();
+        assert_eq!(kind, ClipKind::Image);
+        assert_eq!(body.len(), MAX_IMAGE_LEN as usize);
+    }
+
+    #[test]
+    fn image_over_the_limit_is_refused_at_the_header() {
+        let mut out = Vec::new();
+        encode_image_data(1, 40_000_000, &mut out).unwrap();
+        assert_eq!(
+            read_at(2, &out),
+            Err(ProtocolError::ImageTooLong { len: 40_000_000 })
+        );
+    }
+
+    #[test]
+    fn image_header_at_version_1_is_an_unknown_type() {
+        let png = png_like(16);
+        assert_eq!(
+            read_at(1, &image_transfer(1, &png, 16)),
+            Err(ProtocolError::UnknownType {
+                ty: registry::CLIPBOARD_IMAGE_DATA
+            })
+        );
+    }
+
+    #[test]
+    fn image_must_start_with_the_png_signature() {
+        let mut bad = png_like(16);
+        bad[3] = b'X';
+        assert_eq!(
+            read_at(2, &image_transfer(1, &bad, 16)),
+            Err(ProtocolError::NotPng)
+        );
+        // Split 3 + 5 across two chunks, then the rest: still checked.
+        assert_eq!(
+            read_at(2, &image_transfer(1, &bad, 3)),
+            Err(ProtocolError::NotPng)
+        );
+        let mut late = png_like(16);
+        late[6] = 0;
+        assert_eq!(
+            read_at(2, &image_transfer(1, &late, 3)),
+            Err(ProtocolError::NotPng)
+        );
+        // A good signature split the same way is accepted.
+        let good = png_like(16);
+        assert_eq!(
+            read_at(2, &image_transfer(4, &good, 3)),
+            Ok((4, ClipKind::Image, good))
+        );
+    }
+
+    #[test]
+    fn image_too_short_for_a_signature_is_not_a_png() {
+        let mut out = Vec::new();
+        encode_image_data(1, 7, &mut out).unwrap();
+        assert_eq!(read_at(2, &out), Err(ProtocolError::NotPng));
+    }
+
+    #[test]
+    fn text_is_unchanged_at_either_version() {
+        for version in [1, 2] {
+            assert_eq!(
+                read_at(version, &transfer(5, b"hello")),
+                Ok((5, ClipKind::Text, b"hello".to_vec()))
+            );
+        }
+        // Text bytes are never checked against the PNG signature.
+        assert!(read_at(2, &transfer(5, &[0; 16])).is_ok());
     }
 
     #[test]
@@ -238,7 +460,7 @@ mod tests {
             }
         }
         for len in [11, 13] {
-            let mut r = TransferReader::new();
+            let mut r = TransferReader::new(2);
             assert_eq!(
                 r.on_message(registry::CLIPBOARD_DATA, &vec![0; len]),
                 Err(ProtocolError::PayloadLength {
@@ -292,7 +514,7 @@ mod tests {
 
     #[test]
     fn empty_chunks_and_bad_order_are_rejected() {
-        let mut r = TransferReader::new();
+        let mut r = TransferReader::new(2);
         r.on_message(registry::CLIPBOARD_DATA, &[0; 12]).unwrap();
         assert_eq!(
             r.on_message(registry::CLIPBOARD_CHUNK, &[]),
@@ -321,7 +543,7 @@ mod tests {
 
     #[test]
     fn failed_reader_stays_failed() {
-        let mut r = TransferReader::new();
+        let mut r = TransferReader::new(2);
         assert!(r.on_message(registry::CLIPBOARD_CHUNK, b"x").is_err());
         assert_eq!(
             r.on_message(registry::CLIPBOARD_DATA, &[0; 12]),
@@ -338,7 +560,7 @@ mod tests {
 
     #[test]
     fn chunks_are_lent_not_copied() {
-        let mut r = TransferReader::new();
+        let mut r = TransferReader::new(2);
         r.on_message(
             registry::CLIPBOARD_DATA,
             &[0, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0],

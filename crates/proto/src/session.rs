@@ -198,13 +198,25 @@ mod tests {
             ty: registry::HELLO,
             payload: &payload,
         });
-        assert_eq!(event, Ok(ControlEvent::Agreed(1)));
+        assert_eq!(event, Ok(ControlEvent::Agreed(2)));
         s
     }
 
     #[test]
     fn hello_agrees_version() {
-        assert_eq!(agreed().version(), Some(1));
+        assert_eq!(agreed().version(), Some(2));
+    }
+
+    #[test]
+    fn hello_from_a_version_1_peer_agrees_version_1() {
+        let mut s = Session::new(Hello::this_release());
+        let payload = hello_frame(&Hello { min: 1, max: 1 });
+        let event = s.on_control_frame(Frame {
+            ty: registry::HELLO,
+            payload: &payload,
+        });
+        assert_eq!(event, Ok(ControlEvent::Agreed(1)));
+        assert_eq!(s.version(), Some(1));
     }
 
     #[test]

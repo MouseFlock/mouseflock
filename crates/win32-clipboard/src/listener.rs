@@ -1,6 +1,13 @@
-//! The `deskhop-clipboard` thread (add-text-clipboard design D5): a hidden
-//! window listening for clipboard changes, reading a copy once the clipboard
-//! has been still for [`SETTLE_MS`], and writing text it is given.
+//! The `deskhop-clipboard` thread (add-text-clipboard design D5,
+//! add-clipboard-images D5): a hidden window listening for clipboard changes,
+//! reading a copy once the clipboard has been still for [`SETTLE_MS`], and
+//! writing the text and images it is given.
+//!
+//! A copy is read in this order: privacy markers first, so a private copy's
+//! contents are never read; then text; then an image, from the `PNG` format
+//! as it is, or else from `CF_DIBV5` or `CF_DIB` encoded to PNG. A received
+//! image is decoded on this thread, in order with the text it is given, and
+//! set as `PNG` plus `CF_DIBV5`.
 //!
 //! Its own writes are recognised by the clipboard's sequence number and
 //! never reported.
@@ -20,7 +27,7 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Memory::{
     GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock,
 };
-use windows::Win32::System::Ole::CF_UNICODETEXT;
+use windows::Win32::System::Ole::{CF_DIB, CF_DIBV5, CF_UNICODETEXT};
 use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW, KillTimer, MSG,
@@ -29,6 +36,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::{PCWSTR, w};
 
+use crate::image::{ImageError, check_png, dib_to_png, png_end, png_to_dibv5};
 use crate::text::{MAX_TEXT_LEN, Markers, to_utf8, to_utf16z};
 
 /// How long the clipboard must be still before a copy is read.
@@ -38,27 +46,41 @@ const OPEN_FOR: Duration = Duration::from_secs(1);
 const OPEN_RETRY: Duration = Duration::from_millis(20);
 /// The settle timer's id.
 const SETTLE: usize = 1;
-/// Posted to the thread when text is waiting to be set.
+/// Posted to the thread when a copy is waiting to be set.
 const WM_SET: u32 = WM_APP;
 const CLASS: PCWSTR = w!("DeskHopClipboard");
 
-/// What the clipboard held after a copy settled.
+/// What the clipboard held after a copy settled, or why a received image
+/// could not be set.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Copied {
     Text(String),
+    /// An image with no text alongside it, as one PNG within the image
+    /// limits: the copying app's own PNG, or its bitmap encoded.
+    Image(Vec<u8>),
     /// Marked to stay out of clipboard monitoring, history or cloud sync.
     Private,
-    /// No Unicode text on the clipboard.
+    /// Neither text nor an image this thread can share.
     NoText,
-    /// Text over the 4 MiB limit.
+    /// Text over the 4 MiB limit, or an image over the image limits.
     TooLarge,
+    /// A received image could not be decoded, so the clipboard was left as
+    /// it was. Not a copy: nothing is shared for it.
+    NotSet(ImageError),
+}
+
+/// A copy waiting to be set by the clipboard thread.
+enum Set {
+    Text(String),
+    /// One PNG, decoded on the clipboard thread.
+    Image(Vec<u8>),
 }
 
 /// The running clipboard thread. Dropping it stops the thread and removes
 /// the listener.
 pub struct Clipboard {
     thread_id: u32,
-    sets: Sender<String>,
+    sets: Sender<Set>,
     handle: Option<JoinHandle<()>>,
 }
 
@@ -66,7 +88,19 @@ impl Clipboard {
     /// Replaces the clipboard with `text` as Unicode text, on the clipboard
     /// thread. The change is not reported as a copy.
     pub fn set(&self, text: String) {
-        if self.sets.send(text).is_ok() {
+        self.queue(Set::Text(text));
+    }
+
+    /// Decodes `png` on the clipboard thread and replaces the clipboard with
+    /// the image, as `PNG` and `CF_DIBV5`. The change is not reported as a
+    /// copy. If it cannot be decoded, or is over the image limits, the
+    /// clipboard is left as it was and [`Copied::NotSet`] is reported.
+    pub fn set_image(&self, png: Vec<u8>) {
+        self.queue(Set::Image(png));
+    }
+
+    fn queue(&self, set: Set) {
+        if self.sets.send(set).is_ok() {
             // SAFETY: posts a message with no pointers to a thread whose
             // queue exists (it was created before the thread reported ready).
             let _ = unsafe { PostThreadMessageW(self.thread_id, WM_SET, WPARAM(0), LPARAM(0)) };
@@ -115,7 +149,7 @@ pub fn start() -> windows::core::Result<(Clipboard, Receiver<Copied>)> {
 
 fn run(
     tx: &Sender<Copied>,
-    sets: &Receiver<String>,
+    sets: &Receiver<Set>,
     ready: &mpsc::SyncSender<windows::core::Result<u32>>,
 ) {
     let hwnd = match window() {
@@ -149,8 +183,22 @@ fn run(
                 let _ = tx.send(copied);
             }
         } else if msg.message == WM_SET {
-            while let Ok(text) = sets.try_recv() {
-                if write(Some(hwnd), &to_utf16z(&text), &[]) {
+            while let Ok(set) = sets.try_recv() {
+                let written = match set {
+                    Set::Text(text) => write(Some(hwnd), &to_utf16z(&text), &[]),
+                    Set::Image(png) => match png_to_dibv5(&png) {
+                        Ok(dib) => write(
+                            Some(hwnd),
+                            &[],
+                            &[(png_format(), png), (u32::from(CF_DIBV5.0), dib)],
+                        ),
+                        Err(e) => {
+                            let _ = tx.send(Copied::NotSet(e));
+                            false
+                        }
+                    },
+                };
+                if written {
                     // SAFETY: no arguments.
                     own = Some(unsafe { GetClipboardSequenceNumber() });
                 }
@@ -271,6 +319,11 @@ fn format(name: PCWSTR) -> u32 {
     unsafe { RegisterClipboardFormatW(name) }
 }
 
+/// The registered `PNG` format, as browsers and the Snipping Tool use it.
+pub(crate) fn png_format() -> u32 {
+    format(w!("PNG"))
+}
+
 /// The privacy markers' format ids.
 pub(crate) fn marker_formats() -> (u32, u32, u32) {
     (
@@ -331,7 +384,7 @@ pub(crate) fn read(owner: Option<HWND>) -> Option<Copied> {
     }
     let text = u32::from(CF_UNICODETEXT.0);
     if !available(&open, text) {
-        return Some(Copied::NoText);
+        return Some(read_image(&open).unwrap_or(Copied::NoText));
     }
     let read = with_data(&open, text, |bytes| {
         // Each UTF-16 unit is at least one byte of UTF-8: reject the
@@ -351,6 +404,53 @@ pub(crate) fn read(owner: Option<HWND>) -> Option<Copied> {
         }
     });
     Some(read.unwrap_or(Copied::NoText))
+}
+
+/// Where an image may be read from, best first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ImageSource {
+    /// The app's own PNG, used as it is.
+    Png,
+    /// A bitmap, encoded to PNG.
+    Dib(u32),
+}
+
+/// The image sources to try, best first, given which formats are on the
+/// clipboard. Only consulted when there is no text: text wins.
+pub(crate) fn image_sources(has: impl Fn(u32) -> bool, png: u32) -> Vec<ImageSource> {
+    let mut sources = Vec::new();
+    if has(png) {
+        sources.push(ImageSource::Png);
+    }
+    for dib in [u32::from(CF_DIBV5.0), u32::from(CF_DIB.0)] {
+        if has(dib) {
+            sources.push(ImageSource::Dib(dib));
+        }
+    }
+    sources
+}
+
+/// The image on the open clipboard, as one PNG, if there is one this thread
+/// can share. A source that turns out malformed or unsupported gives way to
+/// the next; one over the limits makes the copy too large.
+fn read_image(open: &Open) -> Option<Copied> {
+    let png = png_format();
+    for source in image_sources(|f| available(open, f), png) {
+        let got = match source {
+            ImageSource::Png => with_data(open, png, |bytes| {
+                let bytes = bytes.get(..png_end(bytes)?)?;
+                Some(check_png(bytes).map(|_| bytes.to_vec()))
+            })
+            .flatten(),
+            ImageSource::Dib(format) => with_data(open, format, dib_to_png),
+        };
+        match got {
+            Some(Ok(png)) => return Some(Copied::Image(png)),
+            Some(Err(ImageError::TooLarge)) => return Some(Copied::TooLarge),
+            Some(Err(_)) | None => {}
+        }
+    }
+    None
 }
 
 /// Puts `data` for `format` on the open, emptied clipboard.
@@ -391,6 +491,36 @@ pub(crate) fn write(owner: Option<HWND>, units: &[u16], extra: &[(u32, Vec<u8>)]
         return false;
     }
     extra.iter().all(|(format, data)| put(&open, *format, data))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const PNG: u32 = 0xc123;
+    const DIBV5: u32 = 17;
+    const DIB: u32 = 8;
+
+    fn sources(present: &[u32]) -> Vec<ImageSource> {
+        image_sources(|f| present.contains(&f), PNG)
+    }
+
+    #[test]
+    fn png_first_then_dibv5_then_dib() {
+        assert_eq!(u32::from(CF_DIBV5.0), DIBV5);
+        assert_eq!(u32::from(CF_DIB.0), DIB);
+        assert_eq!(
+            sources(&[DIB, PNG, DIBV5]),
+            [
+                ImageSource::Png,
+                ImageSource::Dib(DIBV5),
+                ImageSource::Dib(DIB)
+            ]
+        );
+        assert_eq!(sources(&[DIB]), [ImageSource::Dib(DIB)]);
+        assert_eq!(sources(&[PNG]), [ImageSource::Png]);
+        assert_eq!(sources(&[0xc999]), []);
+    }
 }
 
 /// Against the real clipboard, so they need a logged-on desktop, replace
@@ -467,6 +597,126 @@ mod desktop {
         let custom = format(w!("DeskHop test format"));
         assert!(write(None, &[], &[(custom, b"not text".to_vec())]));
         assert_eq!(rx.recv_timeout(WAIT).unwrap(), Copied::NoText);
+    }
+
+    /// A 2 × 2 bottom-up 32 bpp BI_RGB bitmap with these BGRA pixels, top
+    /// row first, as an app copying \`CF_DIB\` would make it.
+    fn dib_2x2(px: [[u8; 4]; 4]) -> Vec<u8> {
+        let mut out = vec![0u8; 40];
+        out[0..4].copy_from_slice(&40u32.to_le_bytes());
+        out[4..8].copy_from_slice(&2i32.to_le_bytes());
+        out[8..12].copy_from_slice(&2i32.to_le_bytes());
+        out[12..14].copy_from_slice(&1u16.to_le_bytes());
+        out[14..16].copy_from_slice(&32u16.to_le_bytes());
+        // Bottom-up: the second row first.
+        for p in [px[2], px[3], px[0], px[1]] {
+            out.extend_from_slice(&p);
+        }
+        out
+    }
+
+    /// Decodes a PNG to (width, height, RGBA) through the crate's own path.
+    fn pixels(png: &[u8]) -> Vec<u8> {
+        let dib = png_to_dibv5(png).unwrap();
+        dib[124..].to_vec()
+    }
+
+    #[test]
+    #[ignore = "uses the desktop clipboard"]
+    fn bitmap_copy_is_reported_as_png() {
+        let (_clipboard, rx) = start().unwrap();
+        let px = [
+            [0, 0, 255, 255],
+            [0, 255, 0, 255],
+            [255, 0, 0, 255],
+            [9, 9, 9, 255],
+        ];
+        assert!(write(None, &[], &[(u32::from(CF_DIB.0), dib_2x2(px))]));
+        let Copied::Image(png) = rx.recv_timeout(WAIT).unwrap() else {
+            panic!("not reported as an image");
+        };
+        assert_eq!(check_png(&png), Ok((2, 2)));
+        // The same pixels, bottom-up BGRA in the decoded bitmap.
+        assert_eq!(pixels(&png), dib_2x2(px)[40..]);
+    }
+
+    #[test]
+    #[ignore = "uses the desktop clipboard"]
+    fn png_copy_is_reported_byte_for_byte() {
+        let (_clipboard, rx) = start().unwrap();
+        let png = dib_to_png(&dib_2x2([[1, 2, 3, 255]; 4])).unwrap();
+        assert!(write(None, &[], &[(png_format(), png.clone())]));
+        assert_eq!(rx.recv_timeout(WAIT).unwrap(), Copied::Image(png));
+    }
+
+    #[test]
+    #[ignore = "uses the desktop clipboard"]
+    fn text_wins_over_an_image() {
+        let (_clipboard, rx) = start().unwrap();
+        let png = dib_to_png(&dib_2x2([[1, 2, 3, 255]; 4])).unwrap();
+        copy("deskhop cells", &[(png_format(), png)]);
+        assert_eq!(
+            rx.recv_timeout(WAIT).unwrap(),
+            Copied::Text("deskhop cells".into())
+        );
+    }
+
+    #[test]
+    #[ignore = "uses the desktop clipboard"]
+    fn private_image_is_reported_private() {
+        let (_clipboard, rx) = start().unwrap();
+        let (exclude, ..) = marker_formats();
+        let png = dib_to_png(&dib_2x2([[1, 2, 3, 255]; 4])).unwrap();
+        assert!(write(
+            None,
+            &[],
+            &[(png_format(), png), (exclude, Vec::new())]
+        ));
+        assert_eq!(rx.recv_timeout(WAIT).unwrap(), Copied::Private);
+    }
+
+    #[test]
+    #[ignore = "uses the desktop clipboard"]
+    fn set_image_is_readable_as_a_bitmap_and_not_reported() {
+        let (clipboard, rx) = start().unwrap();
+        let px = [
+            [10, 20, 30, 255],
+            [40, 50, 60, 255],
+            [70, 80, 90, 255],
+            [100, 110, 120, 255],
+        ];
+        let png = dib_to_png(&dib_2x2(px)).unwrap();
+        clipboard.set_image(png.clone());
+        quiet(&rx, Duration::from_millis(600));
+        // Read back as another app would: the PNG as given, and CF_DIB,
+        // which Windows synthesizes from our CF_DIBV5.
+        let open = open(None).unwrap();
+        let back = with_data(&open, png_format(), <[u8]>::to_vec).unwrap();
+        assert_eq!(back.get(..png.len()), Some(&png[..]));
+        let dib = with_data(&open, u32::from(CF_DIB.0), <[u8]>::to_vec).unwrap();
+        drop(open);
+        assert_eq!(
+            pixels(&dib_to_png(&dib).unwrap()),
+            pixels(&png),
+            "CF_DIB holds other pixels"
+        );
+    }
+
+    #[test]
+    #[ignore = "uses the desktop clipboard"]
+    fn corrupt_image_leaves_the_clipboard_alone() {
+        let (clipboard, rx) = start().unwrap();
+        copy("deskhop before", &[]);
+        assert_eq!(
+            rx.recv_timeout(WAIT).unwrap(),
+            Copied::Text("deskhop before".into())
+        );
+        let mut bad = dib_to_png(&dib_2x2([[1, 2, 3, 255]; 4])).unwrap();
+        let n = bad.len();
+        bad[n / 2] ^= 0xff;
+        clipboard.set_image(bad);
+        assert!(matches!(rx.recv_timeout(WAIT).unwrap(), Copied::NotSet(_)));
+        assert_eq!(read(None), Some(Copied::Text("deskhop before".into())));
     }
 
     #[test]

@@ -34,7 +34,7 @@ pub mod session;
 pub use error::{EncodeError, ProtocolError};
 
 /// Highest peer-to-peer protocol version this release speaks.
-pub const PROTOCOL_VERSION: u16 = 1;
+pub const PROTOCOL_VERSION: u16 = 2;
 
 /// Lowest peer-to-peer protocol version this release speaks.
 pub const MIN_PROTOCOL_VERSION: u16 = 1;

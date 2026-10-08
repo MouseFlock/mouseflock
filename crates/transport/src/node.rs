@@ -13,7 +13,8 @@ use pairing::{
     UnixTime,
 };
 use proto::CloseReason;
-use proto::clipboard::ClipboardMessage;
+use proto::clipboard::{ClipKind, ClipboardMessage};
+use proto::hello::Hello;
 use proto::pairing::{PairingMessage, RecordsDone};
 use rand_core::OsRng;
 use tokio::sync::{mpsc, oneshot};
@@ -55,6 +56,9 @@ pub struct Config {
     /// The interfaces to use instead of the operating system's (tests).
     pub network: Option<Network>,
     pub stranger_timeout: Duration,
+    /// The protocol versions this node advertises: this release's range, or
+    /// a narrower one in tests that stand in for an older release.
+    pub hello: Hello,
 }
 
 impl Config {
@@ -69,6 +73,32 @@ impl Config {
             addresses: BTreeMap::new(),
             network: None,
             stranger_timeout: STRANGER_TIMEOUT,
+            hello: Hello::this_release(),
+        }
+    }
+}
+
+/// A copy's contents on the wire: text, or an image as one PNG. The node
+/// never decodes an image.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Contents {
+    Text(Arc<str>),
+    Image(Arc<[u8]>),
+}
+
+impl Contents {
+    pub fn kind(&self) -> ClipKind {
+        match self {
+            Self::Text(_) => ClipKind::Text,
+            Self::Image(_) => ClipKind::Image,
+        }
+    }
+
+    /// The bytes that travel: UTF-8 text, or the PNG file.
+    pub fn bytes(&self) -> &[u8] {
+        match self {
+            Self::Text(t) => t.as_bytes(),
+            Self::Image(b) => b,
         }
     }
 }
@@ -117,11 +147,17 @@ pub enum Event {
         peer: PeerId,
         id: u64,
     },
-    /// Clipboard text an up member sent on a clipboard stream.
-    ClipboardText {
+    /// A copy an up member sent on a clipboard stream, text or image.
+    ClipboardData {
         peer: PeerId,
         id: u64,
-        text: Arc<str>,
+        contents: Contents,
+    },
+    /// Bytes of a requested copy are still arriving from an up member.
+    /// Reported at most once a second per transfer.
+    ClipboardProgress {
+        peer: PeerId,
+        id: u64,
     },
 }
 
@@ -146,8 +182,10 @@ enum Command {
     Resume,
     Sighting(Sighting),
     Send(PeerId, PeerMessage),
-    Clipboard(PeerId, ClipboardMessage),
-    SendClipboard(PeerId, u64, Arc<str>),
+    /// A clipboard message, sent only if the peer's connection agreed at
+    /// least this version.
+    Clipboard(PeerId, ClipboardMessage, u16),
+    SendClipboard(PeerId, u64, Contents),
     Connections(oneshot::Sender<Vec<Connection>>),
     Shutdown,
 }
@@ -217,22 +255,26 @@ impl NodeHandle {
         let _ = self.tx.send(Command::Send(peer, msg));
     }
 
-    /// Tells peer, if it is up, that this machine has a new shareable copy.
-    pub fn offer_clipboard(&self, peer: PeerId, id: u64) {
+    /// Tells peer, if it is up, that this machine has a new shareable copy
+    /// of `kind`. An image is offered only if the peer's connection agreed a
+    /// version that defines images; otherwise the offer is dropped, so a
+    /// peer running an older release never learns of the copy.
+    pub fn offer_clipboard(&self, peer: PeerId, id: u64, kind: ClipKind) {
         let msg = ClipboardMessage::Offer { id };
-        let _ = self.tx.send(Command::Clipboard(peer, msg));
+        let _ = self.tx.send(Command::Clipboard(peer, msg, kind.since()));
     }
 
     /// Asks peer, if it is up, for its copy with this ID.
     pub fn request_clipboard(&self, peer: PeerId, id: u64) {
         let msg = ClipboardMessage::Request { id };
-        let _ = self.tx.send(Command::Clipboard(peer, msg));
+        let _ = self.tx.send(Command::Clipboard(peer, msg, 1));
     }
 
-    /// Sends clipboard text to peer, if it is up, on a clipboard stream of
-    /// its own. Text over the transfer limit is not sent.
-    pub fn send_clipboard(&self, peer: PeerId, id: u64, text: Arc<str>) {
-        let _ = self.tx.send(Command::SendClipboard(peer, id, text));
+    /// Sends a copy to peer, if it is up, on a clipboard stream of its own.
+    /// A copy over its kind's limit, or an image to a peer whose connection
+    /// agreed version 1, is not sent.
+    pub fn send_clipboard(&self, peer: PeerId, id: u64, contents: Contents) {
+        let _ = self.tx.send(Command::SendClipboard(peer, id, contents));
     }
 
     /// How many member connections are open, for diagnostics.
@@ -280,6 +322,7 @@ pub fn start(config: Config) -> Result<(NodeHandle, mpsc::UnboundedReceiver<Even
         dial_port: config.dial_port,
         network: config.network,
         stranger_timeout: config.stranger_timeout,
+        hello: config.hello,
         mdns,
         start: Instant::now(),
         next_conn: 0,
@@ -312,14 +355,17 @@ pub(crate) enum Internal {
     Accepted(quinn::Connection),
     Dialed(quinn::Connection, Purpose),
     DialFailed(Purpose, Vec<Option<CloseReason>>),
-    Ready(ConnId),
+    /// The connection agreed this protocol version.
+    Ready(ConnId, u16),
     Message(ConnId, u16, Vec<u8>),
     /// An engine message from a member connection, already decoded.
     Peer(ConnId, PeerMessage),
     /// A clipboard offer or request from a member connection.
     Clipboard(ConnId, ClipboardMessage),
-    /// Complete clipboard text from a member connection's clipboard stream.
-    ClipboardText(ConnId, u64, Arc<str>),
+    /// A complete copy from a member connection's clipboard stream.
+    ClipboardData(ConnId, u64, Contents),
+    /// Bytes of this copy are still arriving on a clipboard stream.
+    ClipboardProgress(ConnId, u64),
     Closed(ConnId, Cause),
 }
 
@@ -399,6 +445,8 @@ struct Conn {
     superseded: bool,
     /// Why this side closed it, if it did.
     local_down: Option<Down>,
+    /// The protocol version the connection agreed; 0 until it has.
+    version: u16,
 }
 
 impl Conn {
@@ -428,6 +476,8 @@ struct Node {
     dial_port: u16,
     network: Option<Network>,
     stranger_timeout: Duration,
+    /// The `Hello` every connection sends.
+    hello: Hello,
     mdns: Option<Mdns>,
     start: Instant,
     next_conn: u64,
@@ -559,17 +609,20 @@ impl Node {
                     conn.send(Out::Peer(msg));
                 }
             }
-            Command::Clipboard(peer, msg) => {
+            Command::Clipboard(peer, msg, since) => {
                 let mut frame = Vec::new();
                 if let Some(conn) = self.up.get(&peer).and_then(|id| self.conns.get(id))
+                    && conn.version >= since
                     && msg.encode(&mut frame).is_ok()
                 {
                     conn.send(Out::Frame(frame));
                 }
             }
-            Command::SendClipboard(peer, id, text) => {
-                if let Some(conn) = self.up.get(&peer).and_then(|id| self.conns.get(id)) {
-                    conn.send(Out::Transfer(id, text));
+            Command::SendClipboard(peer, id, contents) => {
+                if let Some(conn) = self.up.get(&peer).and_then(|id| self.conns.get(id))
+                    && conn.version >= contents.kind().since()
+                {
+                    conn.send(Out::Transfer(id, contents));
                 }
             }
             Command::Connections(reply) => {
@@ -629,7 +682,7 @@ impl Node {
             Internal::Accepted(connection) => self.accepted(connection),
             Internal::Dialed(connection, purpose) => self.dialed(connection, purpose),
             Internal::DialFailed(purpose, reasons) => self.dial_failed(purpose, reasons),
-            Internal::Ready(id) => self.ready(id),
+            Internal::Ready(id, version) => self.ready(id, version),
             Internal::Message(id, ty, payload) => self.message(id, ty, &payload),
             Internal::Peer(id, msg) => self.peer_message(id, msg),
             Internal::Clipboard(id, msg) => {
@@ -640,13 +693,18 @@ impl Node {
                     });
                 }
             }
-            Internal::ClipboardText(id, clip, text) => {
+            Internal::ClipboardData(id, clip, contents) => {
                 if let Some(peer) = self.up_peer(id) {
-                    self.emit(Event::ClipboardText {
+                    self.emit(Event::ClipboardData {
                         peer,
                         id: clip,
-                        text,
+                        contents,
                     });
+                }
+            }
+            Internal::ClipboardProgress(id, clip) => {
+                if let Some(peer) = self.up_peer(id) {
+                    self.emit(Event::ClipboardProgress { peer, id: clip });
                 }
             }
             Internal::Closed(id, cause) => self.closed(id, cause),
@@ -668,6 +726,7 @@ impl Node {
             connection.clone(),
             dialed,
             matches!(role, Role::Member { .. }),
+            self.hello,
             out_rx,
             self.internal.clone(),
         ));
@@ -683,6 +742,7 @@ impl Node {
                 stranger_until: None,
                 superseded: false,
                 local_down: None,
+                version: 0,
             },
         );
         id
@@ -801,12 +861,13 @@ impl Node {
         out
     }
 
-    fn ready(&mut self, id: ConnId) {
+    fn ready(&mut self, id: ConnId, version: u16) {
         let me = self.me;
         let frames = self.machine.record_frames();
         let Some(conn) = self.conns.get_mut(&id) else {
             return;
         };
+        conn.version = version;
         let exporter = Self::exporter(&conn.connection);
         let (dialed, out) = (conn.dialed, conn.out.clone());
         match &mut conn.role {

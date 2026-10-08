@@ -1,6 +1,6 @@
 # DeskHop threat model
 
-*Status: covers the wire, pairing, desk membership, the LAN transport, forwarded input, the agent → service and UI → service pipes, the UI app, the clipboard, the service's data folder, console mode, secure attention, the secure desktop, and installing and uninstalling. Elevated windows on the user's desktop are a known gap, left to a later change.*
+*Status: covers the wire, pairing, desk membership, the LAN transport, forwarded input, the agent → service and UI → service pipes, the UI app, the clipboard (text and images, including untrusted image data), the service's data folder, console mode, secure attention, the secure desktop, and installing and uninstalling. Elevated windows on the user's desktop are a known gap, left to a later change.*
 
 DeskHop injects keystrokes received over the network, and its service runs as SYSTEM. This document records what it defends against and where.
 
@@ -131,20 +131,31 @@ Residual risks:
 
 ### Clipboard
 
-Copied text can hold anything the user copies: messages, code, addresses, sometimes secrets. Specified in `openspec/specs/clipboard/spec.md`, and on the agent link in `openspec/specs/agent-link/spec.md`.
+Copied text and images can hold anything the user copies: messages, code, addresses, screenshots, sometimes secrets. Specified in `openspec/specs/clipboard/spec.md`, and on the agent link in `openspec/specs/agent-link/spec.md`.
 
-- **It moves only where the cursor goes.** A copy sends members a random ID and no text. A member gets the text only by asking for that ID, and asks only when the cursor arrives there, so text never reaches a machine the user did not go to.
-- **Only the newest shareable copy is served.** A request for any other ID gets nothing. A newer private or non-text copy stops the earlier one from being served at all.
-- **Private copies stay on the machine.** The agent checks the markers password managers and similar apps set (`ExcludeClipboardContentFromMonitorProcessing`, or `CanIncludeInClipboardHistory` or `CanUploadToCloudClipboard` set to 0) before reading the text. A marked copy is reported as private, and its text is never read.
-- **On the LAN** text travels only on member connections (QUIC TLS pinned to identity keys), on a clipboard stream of its own, at most 4 MiB, with the order and length checked before any byte is kept. A clipboard stream on a pairing connection, or with a bad layout, closes the connection.
-- **In the service** text lives only in memory: this machine's newest shareable copy, and at most one incoming transfer per connection. It is never written to the log or to disk; the log records lengths only.
-- **A hostile agent or peer** is bounded by the 4 MiB limit, the run and stream rules, and the same no-panic decoding and fuzzing as the rest of `ipc` and `proto`. Transfers run on their own streams and tasks, so a slow one cannot delay input.
+- **It moves only where the cursor goes.** A copy sends members a random ID and no contents. A member gets the contents only by asking for that ID, and asks only when the cursor arrives there, so a copy never reaches a machine the user did not go to.
+- **Only the newest shareable copy is served.** A request for any other ID gets nothing. A newer private or unshareable copy stops the earlier one from being served at all.
+- **Private copies stay on the machine.** The agent checks the markers password managers and similar apps set (`ExcludeClipboardContentFromMonitorProcessing`, or `CanIncludeInClipboardHistory` or `CanUploadToCloudClipboard` set to 0) before reading anything else. A marked copy is reported as private, and its text or image is never read.
+- **On the LAN** copies travel only on member connections (QUIC TLS pinned to identity keys), on a clipboard stream of their own: text up to 4 MiB, an image up to 32 MiB, with the order and length checked before any byte is kept. A clipboard stream on a pairing connection, or with a bad layout, closes the connection.
+- **In the service** copies live only in memory: this machine's newest shareable copy, and at most one incoming transfer per connection. With images that is at most 32 MiB each. They are never written to the log or to disk; the log records kind and length only.
+- **A hostile agent or peer** is bounded by those limits, the run and stream rules, and the same no-panic decoding and fuzzing as the rest of `ipc` and `proto`. Transfers run on their own streams and tasks at a priority below input, so a slow one cannot delay input.
+
+**Untrusted image data.** A member can send any bytes labelled as a PNG, and image decoders have a long history of memory-safety bugs. So (add-clipboard-images D5–D7):
+
+- **The SYSTEM service never decodes an image.** It checks only the length (at most 33,554,432 bytes) and the 8-byte PNG signature, on the wire and on the agent link, and passes the bytes on unparsed.
+- **Only the session agent decodes,** as the logged-on user at medium integrity, not as SYSTEM. It uses the pure-Rust `png` crate, which is memory-safe, rather than a native codec. A bug there is a crash or an error in the user's own agent, which the service restarts.
+- **Dimensions are checked before allocating.** The agent reads the width and height from the header and refuses more than 64 megapixels before it allocates anything the size of the image, so a small file claiming huge dimensions cannot exhaust memory. The decoder also runs under a byte limit sized to the image.
+- **Failure leaves the clipboard alone.** A PNG that does not decode is logged by the agent and dropped; the link stays up and the clipboard keeps what it had.
+- **Fuzzed.** `tools/fuzz`'s `decode_png_to_dib` target drives the agent's decode path, and `decode_stream` and `decode_ipc` drive the image headers and runs.
+- **Older peers are not confused.** An image is offered only on a connection that agreed protocol version 2, so a PC running 0.1.0 never receives a message it does not understand.
 
 Residual risks:
 
 - **Any member can ask for the newest shareable copy at any time,** not only when the cursor arrives. A member can already type into this machine and see what it types, so this adds no power. It is still limited to the newest shareable copy.
-- **Text lands in the console user's clipboard.** If a different Windows user is logged on at the target, that user receives it. Desk members are trusted machines; the user chose to pair them.
-- **The receiving PC treats received text as a local copy,** so its own clipboard history or cloud sync may keep it. Private copies are never sent, so nothing marked private is re-exposed this way.
+- **Copies land in the console user's clipboard.** If a different Windows user is logged on at the target, that user receives them. Desk members are trusted machines; the user chose to pair them.
+- **The receiving PC treats a received copy as a local copy,** so its own clipboard history or cloud sync may keep it. Private copies are never sent, so nothing marked private is re-exposed this way.
+- **A received image is decoded in the user's session** by a third-party crate. A decoder bug a member could trigger would run at the user's privileges, not SYSTEM's, and a member can already type into this machine as that user.
+- **Service memory** can reach one 32 MiB held copy plus one 32 MiB incoming transfer per member connection. A member could send large images repeatedly; each one replaces the last, so memory stays bounded by those limits.
 
 ### Identity key at rest
 

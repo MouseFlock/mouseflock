@@ -1,7 +1,9 @@
 //! Stream decoding plus the session state machine, then each message's payload
 //! decoded by its type. The first input byte picks whether the session has
 //! already agreed a version and, bit by bit, whether each frame goes to the
-//! control stream or another stream.
+//! control stream or another stream. The second byte's low bit picks the
+//! peer's highest version, 1 or 2, so clipboard streams are read as a version 1
+//! peer (text only) or a version 2 peer (text and images) would read them.
 
 #![no_main]
 #![forbid(unsafe_code)]
@@ -46,17 +48,29 @@ fn read_transfer(reader: &mut TransferReader, m: Message<'_>) {
 }
 
 fuzz_target!(|data: &[u8]| {
-    let Some((&routing, mut rest)) = data.split_first() else {
+    let Some((&routing, rest)) = data.split_first() else {
         return;
     };
+    let Some((&peer, mut rest)) = rest.split_first() else {
+        return;
+    };
+    let peer_max = 1 + u16::from(peer & 1);
+    let version = peer_max.min(proto::PROTOCOL_VERSION);
     let mut session = Session::new(Hello::this_release());
     if routing & 1 == 1 {
-        let payload = Hello::this_release().payload();
-        let hello = Frame { ty: registry::HELLO, payload: &payload };
+        let payload = Hello {
+            min: 1,
+            max: peer_max,
+        }
+        .payload();
+        let hello = Frame {
+            ty: registry::HELLO,
+            payload: &payload,
+        };
         assert!(session.on_control_frame(hello).is_ok());
     }
     let mut bit = 1;
-    let mut transfer = TransferReader::new();
+    let mut transfer = TransferReader::new(version);
     loop {
         match frame::decode(rest) {
             Ok(Decoded::NeedMore) | Err(_) => return,

@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use engine::{CaptureMode, Decision, Engine, Event as EngineEvent, FocusView, Tuning};
 use ipc::clipboard::Copied;
-use ipc::link::{AgentHandle, AgentRole, FromAgent, UiHandle};
+use ipc::link::{AgentHandle, AgentRole, FromAgent, SetClipboardError, UiHandle};
 use ipc::message::ToAgent;
 use ipc::ui::{
     FocusOf, JoinFailedReason, Member, NotOpenedReason, Pairing, PairingClosedReason, Status,
@@ -21,7 +21,7 @@ use pairing::{Code, CodeError, Desk, JoinFailure, MachineName, ModeClosed, WINDO
 use rand_core::{OsRng, RngCore};
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::Instant;
-use transport::{Down, Event as NodeEvent, NoNetwork, NodeHandle, StartError};
+use transport::{Contents, Down, Event as NodeEvent, NoNetwork, NodeHandle, StartError};
 
 use crate::clipboard::{self, Tracker};
 use crate::launch;
@@ -538,19 +538,31 @@ impl Host {
                 let effects = self.routing.input_desktop(active);
                 self.route(effects);
             }
-            // Session agent only; `ipc` enforces that.
+            // Session agent only; `ipc` enforces that. An image's bytes are
+            // passed on as they are: only the agent decodes images.
             FromAgent::Clipboard(Copied::Text(text)) => {
-                let id = OsRng.next_u64();
-                info!(self.log, "clipboard: offered {} bytes", text.len());
-                self.clipboard.local_text(id, Arc::from(text));
-                for &peer in &self.up {
-                    self.node.offer_clipboard(peer, id);
-                }
+                self.local_copy(Contents::Text(Arc::from(text)));
+            }
+            FromAgent::Clipboard(Copied::Image(png)) => {
+                self.local_copy(Contents::Image(Arc::from(png)));
             }
             FromAgent::Clipboard(Copied::NotShared(why)) => {
                 info!(self.log, "clipboard: copy not shared ({why:?})");
                 self.clipboard.local_not_shared();
             }
+        }
+    }
+
+    /// The agent reported a shareable copy: hold it and offer it to every up
+    /// member. The node offers an image only to members whose connection
+    /// agreed a version that defines images.
+    fn local_copy(&mut self, contents: Contents) {
+        let id = OsRng.next_u64();
+        info!(self.log, "clipboard: offered {}", describe(&contents));
+        let kind = contents.kind();
+        self.clipboard.local_copy(id, contents);
+        for &peer in &self.up {
+            self.node.offer_clipboard(peer, id, kind);
         }
     }
 
@@ -567,28 +579,42 @@ impl Host {
         match event {
             NodeEvent::ClipboardOffer { peer, id } => self.clipboard.offer(peer, id),
             NodeEvent::ClipboardRequest { peer, id } => {
-                if let Some(text) = self.clipboard.request(id) {
+                if let Some(contents) = self.clipboard.request(id) {
                     info!(
                         self.log,
-                        "clipboard: sent {} bytes to {}",
-                        text.len(),
+                        "clipboard: sent {} to {}",
+                        describe(&contents),
                         self.name(peer)
                     );
-                    self.node.send_clipboard(peer, id, text);
+                    self.node.send_clipboard(peer, id, contents);
                 }
             }
-            NodeEvent::ClipboardText { peer, id, text } => {
-                if let Some(text) = self.clipboard.received(peer, id, text) {
+            NodeEvent::ClipboardProgress { peer, id } => {
+                let now = Instant::now().into_std();
+                self.clipboard.progress(peer, id, now);
+            }
+            NodeEvent::ClipboardData { peer, id, contents } => {
+                let now = Instant::now().into_std();
+                if let Some(contents) = self.clipboard.received(peer, id, contents, now) {
                     info!(
                         self.log,
-                        "clipboard: set {} bytes from {}",
-                        text.len(),
+                        "clipboard: set {} from {}",
+                        describe(&contents),
                         self.name(peer)
                     );
                     // Only the session agent has a clipboard, even while
                     // the secure desktop has the input.
                     if let Some(link) = &self.session {
-                        let _ = link.handle.set_clipboard(&text);
+                        let set = match &contents {
+                            Contents::Text(text) => link.handle.set_clipboard(text),
+                            Contents::Image(png) => link.handle.set_clipboard_image(png),
+                        };
+                        if set == Err(SetClipboardError::NoImages) {
+                            info!(
+                                self.log,
+                                "clipboard: the session agent is from an older release and cannot set images"
+                            );
+                        }
                     }
                 }
             }
@@ -710,7 +736,8 @@ impl Host {
                 | NodeEvent::Addresses(_)
                 | NodeEvent::ClipboardOffer { .. }
                 | NodeEvent::ClipboardRequest { .. }
-                | NodeEvent::ClipboardText { .. }
+                | NodeEvent::ClipboardData { .. }
+                | NodeEvent::ClipboardProgress { .. }
         ) {
             self.dirty = true;
         }
@@ -783,7 +810,8 @@ impl Host {
             NodeEvent::Message { peer, msg } => self.engine(EngineEvent::FromPeer { peer, msg }),
             event @ (NodeEvent::ClipboardOffer { .. }
             | NodeEvent::ClipboardRequest { .. }
-            | NodeEvent::ClipboardText { .. }) => self.on_clipboard(event),
+            | NodeEvent::ClipboardData { .. }
+            | NodeEvent::ClipboardProgress { .. }) => self.on_clipboard(event),
         }
     }
 
@@ -841,3 +869,11 @@ mod routing;
 
 #[cfg(test)]
 mod tests;
+
+/// A copy's kind and size, for the log. Never its contents.
+fn describe(contents: &Contents) -> String {
+    match contents {
+        Contents::Text(t) => format!("text, {} bytes", t.len()),
+        Contents::Image(png) => format!("image, {} bytes", png.len()),
+    }
+}

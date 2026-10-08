@@ -44,7 +44,7 @@ impl Rng {
 /// fails, handing each to the session as a control or other-stream frame.
 fn drive_stream(session: &mut Session, input: &[u8], rng: &mut Rng) {
     let mut rest = input;
-    let mut transfer = TransferReader::new();
+    let mut transfer = TransferReader::new(proto::PROTOCOL_VERSION);
     loop {
         match frame::decode(rest) {
             Ok(Decoded::NeedMore) | Err(_) => return,

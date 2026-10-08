@@ -890,6 +890,7 @@ version = "0.1.0"
 dependencies = [
  "ipc",
  "model",
+ "png 0.18.1",
  "tokio",
  "win32-clipboard",
  "win32-input",
@@ -5018,6 +5019,7 @@ checksum = "72069c3113ab32ab29e5584db3c6ec55d416895e60715417b5b883a357c3e471"
 name = "win32-clipboard"
 version = "0.1.0"
 dependencies = [
+ "png 0.18.1",
  "windows 0.61.3",
 ]
 
