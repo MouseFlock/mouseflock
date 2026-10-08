@@ -32,7 +32,7 @@ async fn port_already_in_use() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn hello_agrees_version_1() {
+async fn hello_advertises_versions_1_to_2() {
     let a = node(machine("A"));
     let client = RawClient::new();
     let connection = client
@@ -50,7 +50,7 @@ async fn hello_agrees_version_1() {
     assert_eq!(frame.ty, registry::HELLO);
     assert_eq!(
         Hello::decode(frame.payload).unwrap(),
-        Hello { min: 1, max: 1 }
+        Hello { min: 1, max: 2 }
     );
 }
 

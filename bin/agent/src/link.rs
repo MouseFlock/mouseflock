@@ -3,7 +3,7 @@
 //! design D7).
 //!
 //! Both kinds run the same loop. The session agent also watches and sets
-//! the clipboard; the winlogon agent, on the secure desktop, never touches
+//! the clipboard, text and images; the winlogon agent, on the secure desktop, never touches
 //! the clipboard and instead reports whether its desktop is the input
 //! desktop.
 //!
@@ -113,6 +113,13 @@ async fn link(pipe: &str, role: AgentRole) -> ExitCode {
                         c.set(text);
                     }
                 }
+                // Decoded on the clipboard thread, in order with text, so
+                // this loop never waits on an image.
+                Some(FromService::SetClipboardImage(png)) => {
+                    if let Some(c) = &clipboard {
+                        c.set_image(png);
+                    }
+                }
                 None => break,
             },
             event = events.recv() => {
@@ -148,13 +155,21 @@ fn bridge<T: Send + 'static>(from: std::sync::mpsc::Receiver<T>) -> mpsc::Unboun
     rx
 }
 
-/// Reports a settled copy: its text as a run, or why it is not shared.
+/// Reports a settled copy: its text or image as a run, or why it is not
+/// shared. On a link that agreed IPC version 1, an image is reported as
+/// neither text nor an image. A received image that could not be set is
+/// logged here and reported to no one.
 fn report_copy(reports: &ServiceHandle, copied: Copied) -> Result<(), Closed> {
     let why = match copied {
         Copied::Text(text) => return reports.send_clipboard_text(&text),
+        Copied::Image(png) => return reports.send_clipboard_image(&png),
         Copied::Private => NotShared::Private,
         Copied::NoText => NotShared::NoText,
         Copied::TooLarge => NotShared::TooLarge,
+        Copied::NotSet(e) => {
+            eprintln!("deskhop-agent: received image not set: {e}");
+            return Ok(());
+        }
     };
     reports.send(ToService::ClipboardNotShared(why))
 }

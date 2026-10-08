@@ -110,14 +110,15 @@ fn key(at: u64, usage: u16, down: bool) -> ToService {
 // ---- 2.1 -----------------------------------------------------------------
 
 #[tokio::test]
-async fn handshake_agrees_version_1() {
+async fn handshake_agrees_this_release_version() {
     let (a, b) = tokio::io::duplex(1024);
     let (service, agent) = tokio::join!(
         ServiceEnd::accept(a, AgentRole::Session, || Millis(0)),
         AgentEnd::connect(b, AgentRole::Session, || Millis(0)),
     );
-    assert!(service.is_ok());
-    assert!(agent.is_ok());
+    let (service, _) = service.unwrap();
+    let (agent, _) = agent.unwrap();
+    assert_eq!((service.version(), agent.version()), (2, 2));
 }
 
 #[tokio::test]
@@ -140,8 +141,8 @@ async fn versions_do_not_overlap() {
         buf: Vec::new(),
     };
     raw.hello(Hello {
-        min: 2,
-        max: 3,
+        min: 3,
+        max: 4,
         role: Role::SessionAgent,
     })
     .await;

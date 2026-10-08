@@ -284,3 +284,101 @@ async fn winlogon_ignores_copies() {
     drop(handle);
     assert!(exits_within(&mut child, WAIT).is_some());
 }
+
+// ---- add-clipboard-images 4.3 --------------------------------------------
+
+/// A PNG's width and height, from its header.
+fn png_size(png: &[u8]) -> (u32, u32) {
+    assert_eq!(png.get(..8), Some(&ipc::clipboard::PNG_SIGNATURE[..]));
+    let be = |at: usize| u32::from_be_bytes(png[at..at + 4].try_into().unwrap());
+    (be(16), be(20))
+}
+
+/// A 4 × 3 opaque PNG.
+fn small_png() -> Vec<u8> {
+    let mut out = Vec::new();
+    {
+        let mut e = png::Encoder::new(&mut out, 4, 3);
+        e.set_color(png::ColorType::Rgb);
+        e.set_depth(png::BitDepth::Eight);
+        let px: Vec<u8> = (0..4 * 3 * 3).map(|i| (i * 7) as u8).collect();
+        e.write_header().unwrap().write_image_data(&px).unwrap();
+    }
+    out
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs a desktop; replaces the clipboard"]
+async fn image_copy_is_reported_as_a_png_run() {
+    let (_child, _handle, mut events) = linked_agent().await;
+    next_matching(&mut events, |e| matches!(e, FromAgent::Screen(_))).await;
+
+    // As an app copying a picture would: a bitmap on the clipboard, no text.
+    powershell(
+        "Add-Type -AssemblyName System.Windows.Forms, System.Drawing; \
+         $b = New-Object System.Drawing.Bitmap 5, 2; \
+         $b.SetPixel(0, 0, [System.Drawing.Color]::Red); \
+         [System.Windows.Forms.Clipboard]::SetImage($b)",
+    );
+    let e = next_matching(&mut events, |e| {
+        matches!(e, FromAgent::Clipboard(Copied::Image(_)))
+    })
+    .await;
+    let FromAgent::Clipboard(Copied::Image(png)) = e else {
+        unreachable!()
+    };
+    assert_eq!(png_size(&png), (5, 2));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs a desktop; replaces the clipboard"]
+async fn image_set_reaches_the_clipboard_and_is_not_reported() {
+    let (mut child, handle, mut events) = linked_agent().await;
+    next_matching(&mut events, |e| matches!(e, FromAgent::Screen(_))).await;
+
+    handle.set_clipboard_image(&small_png()).unwrap();
+    let probe = "Add-Type -AssemblyName System.Windows.Forms; \
+                 $i = [System.Windows.Forms.Clipboard]::GetImage(); \
+                 if ($i) { \"$($i.Width)x$($i.Height)\" } else { 'none' }";
+    let end = Instant::now() + WAIT;
+    while powershell(probe) != "4x3" {
+        assert!(Instant::now() < end, "the agent never set the image");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let echo = tokio::time::timeout(Duration::from_millis(600), async {
+        loop {
+            if let Some(FromAgent::Clipboard(c)) = events.recv().await {
+                return c;
+            }
+        }
+    })
+    .await;
+    assert!(echo.is_err(), "the agent reported its own write: {echo:?}");
+
+    drop(handle);
+    assert!(exits_within(&mut child, WAIT).is_some());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs a desktop; replaces the clipboard"]
+async fn corrupt_image_leaves_the_link_up() {
+    let (mut child, handle, mut events) = linked_agent().await;
+    next_matching(&mut events, |e| matches!(e, FromAgent::Screen(_))).await;
+
+    let mut bad = small_png();
+    let n = bad.len();
+    bad[n / 2] ^= 0xff;
+    handle.set_clipboard_image(&bad).unwrap();
+    // The link is still up: a later text set still works.
+    handle.set_clipboard("deskhop after a bad image").unwrap();
+    let end = Instant::now() + WAIT;
+    while powershell("Get-Clipboard -Raw") != "deskhop after a bad image" {
+        assert!(Instant::now() < end, "the link went down after a bad image");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        exits_within(&mut child, Duration::from_millis(300)).is_none(),
+        "the agent exited"
+    );
+    drop(handle);
+}

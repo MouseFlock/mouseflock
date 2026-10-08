@@ -19,12 +19,18 @@ use model::{InputEvent, Millis, Origin, Screen};
 use tokio::io::{AsyncWriteExt, ReadHalf, WriteHalf};
 use tokio::sync::mpsc;
 
-use crate::clipboard::{self, Copied, MAX_TEXT_LEN, NotShared, RunAssembler};
+use crate::clipboard::{
+    self, Copied, Kind, MAX_IMAGE_LEN, MAX_TEXT_LEN, NotShared, PNG_SIGNATURE, Run, RunAssembler,
+};
 use crate::clock::ClockSync;
 use crate::message::{
-    CLIPBOARD_CHUNK, CLIPBOARD_NOT_SHARED, CLIPBOARD_TEXT, ClipboardToAgent, Role, SET_CLIPBOARD,
-    SET_CLIPBOARD_CHUNK, ToAgent, ToAgentAny, ToService, check_agent_role,
+    CLIPBOARD_CHUNK, CLIPBOARD_IMAGE, CLIPBOARD_NOT_SHARED, CLIPBOARD_TEXT, ClipboardToAgent, Role,
+    SET_CLIPBOARD, SET_CLIPBOARD_CHUNK, SET_CLIPBOARD_IMAGE, ToAgent, ToAgentAny, ToService,
+    check_agent_role,
 };
+
+/// The first IPC version with image runs.
+const IMAGES_SINCE: u16 = 2;
 
 pub use common::{Closed, HANDSHAKE_TIMEOUT, LinkError, Stream};
 pub use ui::{MAX_UI_QUEUED, ServiceUiEnd, ServiceUiHandle, UiEnd, UiHandle};
@@ -78,12 +84,14 @@ pub enum FromAgent {
     InputDesktop(bool),
 }
 
-/// Why clipboard text was not queued for an agent.
+/// Why a copy was not queued for an agent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SetClipboardError {
     Closed,
     /// A winlogon agent's link, which never carries the clipboard.
     NoClipboard,
+    /// An image for an agent whose link agreed IPC version 1.
+    NoImages,
 }
 
 impl From<Closed> for SetClipboardError {
@@ -103,12 +111,18 @@ pub struct AgentHandle {
     tx: mpsc::UnboundedSender<Outgoing>,
     shared: Arc<Shared>,
     role: AgentRole,
+    version: u16,
 }
 
 impl AgentHandle {
     /// The kind of agent at the other end.
     pub fn role(&self) -> AgentRole {
         self.role
+    }
+
+    /// The IPC version the link agreed.
+    pub fn version(&self) -> u16 {
+        self.version
     }
 
     /// Queues a command. Never waits; more than [`MAX_QUEUED`] unsent
@@ -132,7 +146,31 @@ impl AgentHandle {
             return Ok(());
         };
         self.push(Outgoing::Clipboard(ClipboardToAgent::Set(len)))?;
-        for piece in clipboard::chunks(text) {
+        for piece in clipboard::chunks(text.as_bytes()) {
+            self.push(Outgoing::Clipboard(ClipboardToAgent::Chunk(piece.to_vec())))?;
+        }
+        Ok(())
+    }
+
+    /// Queues `png` for the agent to decode and put on the clipboard, as one
+    /// run. An image over [`MAX_IMAGE_LEN`] bytes, or one that does not start
+    /// with the PNG signature, is not sent. A winlogon agent's link, or a link
+    /// that agreed IPC version 1, refuses, sending nothing.
+    pub fn set_clipboard_image(&self, png: &[u8]) -> Result<(), SetClipboardError> {
+        if self.role != AgentRole::Session {
+            return Err(SetClipboardError::NoClipboard);
+        }
+        if self.version < IMAGES_SINCE {
+            return Err(SetClipboardError::NoImages);
+        }
+        let Some(len) = u32::try_from(png.len())
+            .ok()
+            .filter(|l| *l <= MAX_IMAGE_LEN && png.starts_with(&PNG_SIGNATURE))
+        else {
+            return Ok(());
+        };
+        self.push(Outgoing::Clipboard(ClipboardToAgent::SetImage(len)))?;
+        for piece in clipboard::chunks(png) {
             self.push(Outgoing::Clipboard(ClipboardToAgent::Chunk(piece.to_vec())))?;
         }
         Ok(())
@@ -204,6 +242,7 @@ impl ServiceEnd {
                 tx: cmd_tx,
                 shared,
                 role,
+                version,
             },
             ev_rx,
         ))
@@ -261,8 +300,13 @@ fn agent_clipboard(
     message: &ToService,
 ) -> Result<Option<Copied>, crate::ProtocolError> {
     Ok(match message {
-        ToService::ClipboardText(len) => runs.start(CLIPBOARD_TEXT, *len)?.map(Copied::Text),
-        ToService::ClipboardChunk(bytes) => runs.chunk(CLIPBOARD_CHUNK, bytes)?.map(Copied::Text),
+        ToService::ClipboardText(len) => runs
+            .start(CLIPBOARD_TEXT, Kind::Text, *len)?
+            .map(Copied::from),
+        ToService::ClipboardImage(len) => runs
+            .start(CLIPBOARD_IMAGE, Kind::Image, *len)?
+            .map(Copied::from),
+        ToService::ClipboardChunk(bytes) => runs.chunk(CLIPBOARD_CHUNK, bytes)?.map(Copied::from),
         ToService::ClipboardNotShared(why) => {
             runs.not_in_run(CLIPBOARD_NOT_SHARED)?;
             Some(Copied::NotShared(*why))
@@ -307,6 +351,7 @@ async fn service_reader<S: Stream>(
             }
             ToService::Screen(screen) => held.push_back(Held::Screen(screen)),
             ToService::ClipboardText(_)
+            | ToService::ClipboardImage(_)
             | ToService::ClipboardChunk(_)
             | ToService::ClipboardNotShared(_) => {
                 if let Some(copied) = copied {
@@ -344,9 +389,15 @@ async fn service_reader<S: Stream>(
 pub struct ServiceHandle {
     tx: mpsc::UnboundedSender<ToService>,
     shared: Arc<Shared>,
+    version: u16,
 }
 
 impl ServiceHandle {
+    /// The IPC version the link agreed.
+    pub fn version(&self) -> u16 {
+        self.version
+    }
+
     /// Queues a report. Never waits.
     pub fn send(&self, message: ToService) -> Result<(), Closed> {
         if self.shared.stopped() {
@@ -365,7 +416,29 @@ impl ServiceHandle {
             return self.send(ToService::ClipboardNotShared(NotShared::TooLarge));
         };
         self.send(ToService::ClipboardText(len))?;
-        for piece in clipboard::chunks(text) {
+        for piece in clipboard::chunks(text.as_bytes()) {
+            self.send(ToService::ClipboardChunk(piece.to_vec()))?;
+        }
+        Ok(())
+    }
+
+    /// Queues a copied image, as one PNG, as one run. On a link that agreed
+    /// IPC version 1 it is reported as neither text nor an image, as a
+    /// version 1 agent would report it; over [`MAX_IMAGE_LEN`] bytes, as too
+    /// large. Bytes that do not start with the PNG signature are reported as
+    /// neither text nor an image.
+    pub fn send_clipboard_image(&self, png: &[u8]) -> Result<(), Closed> {
+        if self.version < IMAGES_SINCE || !png.starts_with(&PNG_SIGNATURE) {
+            return self.send(ToService::ClipboardNotShared(NotShared::NoText));
+        }
+        let Some(len) = u32::try_from(png.len())
+            .ok()
+            .filter(|l| *l <= MAX_IMAGE_LEN)
+        else {
+            return self.send(ToService::ClipboardNotShared(NotShared::TooLarge));
+        };
+        self.send(ToService::ClipboardImage(len))?;
+        for piece in clipboard::chunks(png) {
             self.send(ToService::ClipboardChunk(piece.to_vec()))?;
         }
         Ok(())
@@ -390,6 +463,9 @@ pub enum FromService {
     Command(ToAgent),
     /// Put this text on the clipboard; its whole run has arrived.
     SetClipboard(String),
+    /// Decode this PNG and put the image on the clipboard; its whole run has
+    /// arrived. Its bytes are checked only for length and signature.
+    SetClipboardImage(Vec<u8>),
 }
 
 /// An agent's end of its link.
@@ -423,7 +499,14 @@ impl AgentEnd {
             shared.clone(),
             clock,
         ));
-        Ok((ServiceHandle { tx: out_tx, shared }, cmd_rx))
+        Ok((
+            ServiceHandle {
+                tx: out_tx,
+                shared,
+                version,
+            },
+            cmd_rx,
+        ))
     }
 }
 
@@ -484,11 +567,19 @@ async fn agent_reader<S: Stream, C: Fn() -> Millis + Send + Sync + 'static>(
             ToAgentAny::Command(cmd) => commands.send(FromService::Command(cmd)).is_ok(),
             ToAgentAny::Clipboard(part) => {
                 let done = match part {
-                    ClipboardToAgent::Set(len) => runs.start(SET_CLIPBOARD, len),
+                    ClipboardToAgent::Set(len) => runs.start(SET_CLIPBOARD, Kind::Text, len),
+                    ClipboardToAgent::SetImage(len) => {
+                        runs.start(SET_CLIPBOARD_IMAGE, Kind::Image, len)
+                    }
                     ClipboardToAgent::Chunk(bytes) => runs.chunk(SET_CLIPBOARD_CHUNK, &bytes),
                 };
                 match done {
-                    Ok(Some(text)) => commands.send(FromService::SetClipboard(text)).is_ok(),
+                    Ok(Some(Run::Text(text))) => {
+                        commands.send(FromService::SetClipboard(text)).is_ok()
+                    }
+                    Ok(Some(Run::Image(png))) => {
+                        commands.send(FromService::SetClipboardImage(png)).is_ok()
+                    }
                     Ok(None) => true,
                     Err(_) => false,
                 }

@@ -1,6 +1,6 @@
 //! One task per connection: `Hello` and frames on the control stream, and
 //! engine messages, clipboard messages and motion datagrams once the peer's
-//! records are in. Clipboard text travels on unidirectional streams of its
+//! records are in. Clipboard copies travel on unidirectional streams of their
 //! own, each read or written by a task of its own, so it never queues ahead
 //! of input on the control stream. Every decision about trust belongs to the
 //! node; this task moves bytes and keeps the motion totals (design D1, D4;
@@ -12,7 +12,7 @@ use std::time::Duration;
 use model::{InputAction, PeerMessage};
 use pairing::ConnId;
 use proto::CloseReason;
-use proto::clipboard::{self, ClipboardMessage, MAX_TEXT_LEN, TransferReader, TransferStep};
+use proto::clipboard::{self, ClipKind, ClipboardMessage, TransferReader, TransferStep};
 use proto::frame::{self, Decoded, MAX_FRAME_PAYLOAD};
 use proto::hello::Hello;
 use proto::input::{InputMessage, Mark};
@@ -23,7 +23,10 @@ use tokio::time::Instant;
 
 use crate::forward::{self, Inbound, Outbound};
 use crate::motion::{Receiver, Sender};
-use crate::node::Internal;
+use crate::node::{Contents, Internal};
+
+/// How often a receiving clipboard stream reports progress, at most.
+const PROGRESS_EVERY: Duration = Duration::from_secs(1);
 
 /// What the node asks a connection task to do.
 #[derive(Debug)]
@@ -32,9 +35,10 @@ pub(crate) enum Out {
     Frame(Vec<u8>),
     /// Send an engine message. The node sends these only once the peer is up.
     Peer(PeerMessage),
-    /// Send clipboard text with this ID on a clipboard stream of its own. The
-    /// node sends these only once the peer is up.
-    Transfer(u64, Arc<str>),
+    /// Send a copy with this ID on a clipboard stream of its own. The node
+    /// sends these only once the peer is up, and an image only on a
+    /// connection that agreed version 2 or later.
+    Transfer(u64, Contents),
     /// Let what was written reach the peer, then close with this reason.
     Close(CloseReason),
 }
@@ -138,6 +142,7 @@ pub(crate) async fn run(
     connection: quinn::Connection,
     dialer: bool,
     member: bool,
+    hello: Hello,
     mut out: mpsc::UnboundedReceiver<Out>,
     node: mpsc::UnboundedSender<Internal>,
 ) {
@@ -169,7 +174,7 @@ pub(crate) async fn run(
             return;
         }
     };
-    let mut session = Session::new(Hello::this_release());
+    let mut session = Session::new(hello);
     let mut hello = Vec::new();
     // `Hello` is 4 bytes, far under the frame limit.
     let _ = session.local_hello().encode_frame(&mut hello);
@@ -271,8 +276,12 @@ pub(crate) async fn run(
                         break;
                     }
                 }
-                Some(Out::Transfer(clip, text)) => {
-                    tokio::spawn(write_transfer(connection.clone(), clip, text));
+                Some(Out::Transfer(clip, contents)) => {
+                    // A second guard behind the node's: never an image to a
+                    // peer whose version does not define it.
+                    if session.version().unwrap_or(0) >= contents.kind().since() {
+                        tokio::spawn(write_transfer(connection.clone(), clip, contents));
+                    }
                 }
                 Some(Out::Close(reason)) => {
                     let _ = send.finish();
@@ -325,8 +334,8 @@ fn drain(
             Ok(Decoded::NeedMore) => break,
             Ok(Decoded::Frame { frame, consumed }) => {
                 match session.on_control_frame(frame) {
-                    Ok(ControlEvent::Agreed(_)) => {
-                        let _ = node.send(Internal::Ready(id));
+                    Ok(ControlEvent::Agreed(version)) => {
+                        let _ = node.send(Internal::Ready(id, version));
                     }
                     Ok(ControlEvent::Message(m)) if is_engine_frame(m.info.ty) => {
                         if !fwd.open() {
@@ -361,9 +370,9 @@ fn drain(
     Ok(())
 }
 
-/// Reads one clipboard stream on a task of its own. Complete text goes to
-/// the node; a protocol error closes the connection; a stream the peer
-/// abandons is dropped.
+/// Reads one clipboard stream on a task of its own. A complete copy goes to
+/// the node, with progress reported along the way; a protocol error closes
+/// the connection; a stream the peer abandons is dropped.
 fn spawn_reader(
     id: ConnId,
     stream: quinn::RecvStream,
@@ -373,9 +382,9 @@ fn spawn_reader(
 ) {
     let (session, connection, node) = (session.clone(), connection.clone(), node.clone());
     tokio::spawn(async move {
-        match receive(stream, &session).await {
-            Ok(Some((clip, text))) => {
-                let _ = node.send(Internal::ClipboardText(id, clip, text));
+        match receive(id, stream, &session, &node).await {
+            Ok(Some((clip, contents))) => {
+                let _ = node.send(Internal::ClipboardData(id, clip, contents));
             }
             Ok(None) => {}
             Err(reason) => close(&connection, reason),
@@ -383,18 +392,25 @@ fn spawn_reader(
     });
 }
 
-/// The text a clipboard stream carries, or `None` if the peer reset it.
-/// Holds at most one frame of undecoded bytes plus the text, which the
-/// reader bounds at [`MAX_TEXT_LEN`].
+/// The copy a clipboard stream carries, or `None` if the peer reset it.
+/// Holds at most one frame of undecoded bytes plus the copy, which the reader
+/// bounds by its kind's limit. Reports progress to the node at most once per
+/// [`PROGRESS_EVERY`] while bytes arrive. An image's bytes are passed on
+/// undecoded: the reader has checked only its length and signature.
 async fn receive(
+    id: ConnId,
     mut stream: quinn::RecvStream,
     session: &Session,
-) -> Result<Option<(u64, Arc<str>)>, CloseReason> {
-    let mut reader = TransferReader::new();
-    let mut clip = 0;
-    let mut text = Vec::new();
+    node: &mpsc::UnboundedSender<Internal>,
+) -> Result<Option<(u64, Contents)>, CloseReason> {
+    // Read only after the peer's records, so a version is agreed.
+    let version = session.version().ok_or(CloseReason::ProtocolError)?;
+    let mut reader = TransferReader::new(version);
+    let mut head: Option<(u64, ClipKind)> = None;
+    let mut body = Vec::new();
     let mut buf = Vec::new();
     let mut chunk = [0u8; 16 * 1024];
+    let mut reported = Instant::now();
     loop {
         match stream.read(&mut chunk).await {
             Ok(Some(n)) => {
@@ -407,7 +423,6 @@ async fn receive(
                     else {
                         break;
                     };
-                    // Read only after the peer's records, so a version is agreed.
                     let Ok(StreamEvent::Message(m)) = session.on_stream_frame(frame) else {
                         return Err(CloseReason::ProtocolError);
                     };
@@ -415,34 +430,49 @@ async fn receive(
                         .on_message(m.info.ty, m.payload)
                         .map_err(|_| CloseReason::ProtocolError)?
                     {
-                        TransferStep::Started { id, .. } => clip = id,
-                        TransferStep::Chunk(bytes) => text.extend_from_slice(bytes),
+                        TransferStep::Started { id: clip, kind, .. } => head = Some((clip, kind)),
+                        TransferStep::Chunk(bytes) => body.extend_from_slice(bytes),
                     }
                     start += consumed;
                 }
                 buf.drain(..start);
+                if let Some((clip, _)) = head
+                    && reported.elapsed() >= PROGRESS_EVERY
+                {
+                    reported = Instant::now();
+                    let _ = node.send(Internal::ClipboardProgress(id, clip));
+                }
             }
             Ok(None) => {
                 if !buf.is_empty() || reader.finish().is_err() {
                     return Err(CloseReason::ProtocolError);
                 }
-                let text = clipboard::text(&text).map_err(|_| CloseReason::ProtocolError)?;
-                return Ok(Some((clip, Arc::from(text))));
+                let (clip, kind) = head.ok_or(CloseReason::ProtocolError)?;
+                let contents = match kind {
+                    ClipKind::Text => {
+                        let text =
+                            clipboard::text(&body).map_err(|_| CloseReason::ProtocolError)?;
+                        Contents::Text(Arc::from(text))
+                    }
+                    ClipKind::Image => Contents::Image(Arc::from(body)),
+                };
+                return Ok(Some((clip, contents)));
             }
             Err(_) => return Ok(None),
         }
     }
 }
 
-/// Writes `text` on a new clipboard stream: `ClipboardData`, then chunks of
-/// at most one frame, then the end. Waits for the peer's stream credit, which
-/// it grants one transfer at a time.
-async fn write_transfer(connection: quinn::Connection, clip: u64, text: Arc<str>) {
-    let bytes = text.as_bytes();
+/// Writes `contents` on a new clipboard stream: its kind's header, then
+/// chunks of at most one frame, then the end. Waits for the peer's stream
+/// credit, which it grants one transfer at a time.
+async fn write_transfer(connection: quinn::Connection, clip: u64, contents: Contents) {
+    let kind = contents.kind();
+    let bytes = contents.bytes();
     let Ok(len) = u32::try_from(bytes.len()) else {
         return;
     };
-    if len > MAX_TEXT_LEN {
+    if len > kind.max_len() {
         return;
     }
     let Ok(mut stream) = connection.open_uni().await else {
@@ -452,7 +482,8 @@ async fn write_transfer(connection: quinn::Connection, clip: u64, text: Arc<str>
     // is always sent first.
     let _ = stream.set_priority(-1);
     let mut out = Vec::new();
-    if clipboard::encode_data(clip, len, &mut out).is_err() || stream.write_all(&out).await.is_err()
+    if clipboard::encode_header_for(kind, clip, len, &mut out).is_err()
+        || stream.write_all(&out).await.is_err()
     {
         return;
     }

@@ -1,5 +1,5 @@
 //! `Hello`, the message registry, and the agent link's messages (IPC
-//! version 1).
+//! versions 1 and 2; version 2 adds the image runs).
 //!
 //! All integers are little-endian and every payload but `Screen` has a fixed
 //! length. Times are milliseconds on the sender's monotonic clock.
@@ -9,7 +9,7 @@ use model::{
     Rect, Screen,
 };
 
-use crate::clipboard::{MAX_TEXT_LEN, NotShared};
+use crate::clipboard::{MAX_IMAGE_LEN, MAX_TEXT_LEN, NotShared};
 use crate::{EncodeError, IPC_VERSION, MIN_IPC_VERSION, ProtocolError, frame, ui};
 
 /// Never a valid message type.
@@ -31,6 +31,8 @@ pub const CLIPBOARD_CHUNK: u16 = 0x0017;
 pub const CLIPBOARD_NOT_SHARED: u16 = 0x0018;
 /// Whether the winlogon agent's desktop is the input desktop.
 pub const INPUT_DESKTOP: u16 = 0x0019;
+/// Starts a run of a copied image: its length in bytes of PNG. Version 2.
+pub const CLIPBOARD_IMAGE: u16 = 0x001a;
 
 pub const SET_CAPTURE: u16 = 0x0020;
 pub const INJECT_KEY: u16 = 0x0021;
@@ -41,8 +43,11 @@ pub const WARP: u16 = 0x0025;
 pub const PING: u16 = 0x0026;
 /// Starts a run of text for the agent to put on the clipboard.
 pub const SET_CLIPBOARD: u16 = 0x0027;
-/// Text bytes, within a `SetClipboard` run.
+/// Bytes, within a `SetClipboard` or `SetClipboardImage` run.
 pub const SET_CLIPBOARD_CHUNK: u16 = 0x0028;
+/// Starts a run of an image, as one PNG, for the agent to put on the
+/// clipboard. Version 2.
+pub const SET_CLIPBOARD_IMAGE: u16 = 0x0029;
 
 /// Most monitors a `Screen` may list.
 pub const MAX_MONITORS: usize = 32;
@@ -85,6 +90,16 @@ const fn info(ty: u16, name: &'static str, direction: Direction) -> TypeInfo {
     }
 }
 
+/// A message type introduced in IPC version 2.
+const fn info_v2(ty: u16, name: &'static str, direction: Direction) -> TypeInfo {
+    TypeInfo {
+        ty,
+        name,
+        direction,
+        since: 2,
+    }
+}
+
 /// Every message type, in type order.
 pub const REGISTRY: &[TypeInfo] = &[
     info(HELLO, "Hello", Direction::Both),
@@ -102,6 +117,7 @@ pub const REGISTRY: &[TypeInfo] = &[
         Direction::AgentToService,
     ),
     info(INPUT_DESKTOP, "InputDesktop", Direction::AgentToService),
+    info_v2(CLIPBOARD_IMAGE, "ClipboardImage", Direction::AgentToService),
     info(SET_CAPTURE, "SetCapture", Direction::ServiceToAgent),
     info(INJECT_KEY, "InjectKey", Direction::ServiceToAgent),
     info(INJECT_BUTTON, "InjectButton", Direction::ServiceToAgent),
@@ -113,6 +129,11 @@ pub const REGISTRY: &[TypeInfo] = &[
     info(
         SET_CLIPBOARD_CHUNK,
         "SetClipboardChunk",
+        Direction::ServiceToAgent,
+    ),
+    info_v2(
+        SET_CLIPBOARD_IMAGE,
+        "SetClipboardImage",
         Direction::ServiceToAgent,
     ),
     info(ui::OPEN_PAIRING, "OpenPairing", Direction::UiToService),
@@ -157,7 +178,9 @@ pub fn check(
 /// from the session agent, `InputDesktop` only from the winlogon agent.
 pub fn check_agent_role(ty: u16, role: Role) -> Result<(), ProtocolError> {
     let allowed = match ty {
-        CLIPBOARD_TEXT | CLIPBOARD_CHUNK | CLIPBOARD_NOT_SHARED => role == Role::SessionAgent,
+        CLIPBOARD_TEXT | CLIPBOARD_IMAGE | CLIPBOARD_CHUNK | CLIPBOARD_NOT_SHARED => {
+            role == Role::SessionAgent
+        }
         INPUT_DESKTOP => role == Role::WinlogonAgent,
         _ => true,
     };
@@ -448,7 +471,9 @@ pub enum ToService {
     },
     /// A run of copied text starts: its length in bytes of UTF-8.
     ClipboardText(u32),
-    /// Copied text bytes within the run; 1 to 65,536 of them.
+    /// A run of a copied image starts: its length in bytes of PNG. Version 2.
+    ClipboardImage(u32),
+    /// Copied bytes within the run; 1 to 65,536 of them.
     ClipboardChunk(Vec<u8>),
     /// The newest copy is not shared.
     ClipboardNotShared(NotShared),
@@ -469,6 +494,7 @@ impl ToService {
             Self::Screen(_) => SCREEN,
             Self::Pong { .. } => PONG,
             Self::ClipboardText(_) => CLIPBOARD_TEXT,
+            Self::ClipboardImage(_) => CLIPBOARD_IMAGE,
             Self::ClipboardChunk(_) => CLIPBOARD_CHUNK,
             Self::ClipboardNotShared(_) => CLIPBOARD_NOT_SHARED,
             Self::InputDesktop(_) => INPUT_DESKTOP,
@@ -527,6 +553,7 @@ impl ToService {
                 p.extend_from_slice(&agent.0.to_le_bytes());
             }
             Self::ClipboardText(len) => p.extend_from_slice(&text_len(*len)?.to_le_bytes()),
+            Self::ClipboardImage(len) => p.extend_from_slice(&image_len(*len)?.to_le_bytes()),
             Self::ClipboardChunk(bytes) => p.extend_from_slice(chunk(bytes)?),
             Self::ClipboardNotShared(why) => p.push(why.code()),
             Self::InputDesktop(active) => p.push(u8::from(*active)),
@@ -598,6 +625,7 @@ impl ToService {
                 }
             }
             CLIPBOARD_TEXT => Self::ClipboardText(decode_text_len(ty, payload, &mut f)?),
+            CLIPBOARD_IMAGE => Self::ClipboardImage(decode_image_len(ty, payload, &mut f)?),
             CLIPBOARD_CHUNK => Self::ClipboardChunk(decode_chunk(ty, payload, &mut f)?),
             CLIPBOARD_NOT_SHARED => {
                 exactly(ty, payload, 1)?;
@@ -618,9 +646,18 @@ impl ToService {
     }
 }
 
-/// A run's length, if it is within the limit.
+/// A text run's length, if it is within the limit.
 const fn text_len(len: u32) -> Result<u32, EncodeError> {
     if len > MAX_TEXT_LEN {
+        Err(EncodeError::InvalidField)
+    } else {
+        Ok(len)
+    }
+}
+
+/// An image run's length, if it is within the limit.
+const fn image_len(len: u32) -> Result<u32, EncodeError> {
+    if len > MAX_IMAGE_LEN {
         Err(EncodeError::InvalidField)
     } else {
         Ok(len)
@@ -640,6 +677,15 @@ fn decode_text_len(ty: u16, payload: &[u8], f: &mut Fields<'_>) -> Result<u32, P
     exactly(ty, payload, 4)?;
     let len = f.u32()?;
     if len > MAX_TEXT_LEN {
+        return Err(ProtocolError::InvalidField { ty });
+    }
+    Ok(len)
+}
+
+fn decode_image_len(ty: u16, payload: &[u8], f: &mut Fields<'_>) -> Result<u32, ProtocolError> {
+    exactly(ty, payload, 4)?;
+    let len = f.u32()?;
+    if len > MAX_IMAGE_LEN {
         return Err(ProtocolError::InvalidField { ty });
     }
     Ok(len)
@@ -789,13 +835,15 @@ impl ToAgent {
     }
 }
 
-/// Clipboard text from the service to an agent. Kept apart from [`ToAgent`],
-/// which stays `Copy` with fixed layouts.
+/// A copy from the service to an agent. Kept apart from [`ToAgent`], which
+/// stays `Copy` with fixed layouts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClipboardToAgent {
     /// A run of text to set starts: its length in bytes of UTF-8.
     Set(u32),
-    /// Text bytes within the run; 1 to 65,536 of them.
+    /// A run of an image to set starts: its length in bytes of PNG. Version 2.
+    SetImage(u32),
+    /// Bytes within the run; 1 to 65,536 of them.
     Chunk(Vec<u8>),
 }
 
@@ -803,6 +851,7 @@ impl ClipboardToAgent {
     pub const fn ty(&self) -> u16 {
         match self {
             Self::Set(_) => SET_CLIPBOARD,
+            Self::SetImage(_) => SET_CLIPBOARD_IMAGE,
             Self::Chunk(_) => SET_CLIPBOARD_CHUNK,
         }
     }
@@ -810,6 +859,7 @@ impl ClipboardToAgent {
     pub fn payload(&self) -> Result<Vec<u8>, EncodeError> {
         Ok(match self {
             Self::Set(len) => text_len(*len)?.to_le_bytes().to_vec(),
+            Self::SetImage(len) => image_len(*len)?.to_le_bytes().to_vec(),
             Self::Chunk(bytes) => chunk(bytes)?.to_vec(),
         })
     }
@@ -824,6 +874,7 @@ impl ClipboardToAgent {
         let mut f = Fields::new(ty, payload);
         let message = match ty {
             SET_CLIPBOARD => Self::Set(decode_text_len(ty, payload, &mut f)?),
+            SET_CLIPBOARD_IMAGE => Self::SetImage(decode_image_len(ty, payload, &mut f)?),
             SET_CLIPBOARD_CHUNK => Self::Chunk(decode_chunk(ty, payload, &mut f)?),
             _ => return Err(ProtocolError::UnknownType { ty }),
         };
@@ -842,7 +893,7 @@ pub enum ToAgentAny {
 impl ToAgentAny {
     pub fn decode(ty: u16, payload: &[u8], version: u16) -> Result<Self, ProtocolError> {
         match ty {
-            SET_CLIPBOARD | SET_CLIPBOARD_CHUNK => {
+            SET_CLIPBOARD | SET_CLIPBOARD_IMAGE | SET_CLIPBOARD_CHUNK => {
                 ClipboardToAgent::decode(ty, payload, version).map(Self::Clipboard)
             }
             _ => ToAgent::decode(ty, payload, version).map(Self::Command),
@@ -1135,7 +1186,7 @@ mod tests {
     #[test]
     fn hello() {
         let agent = Hello::this_release(Role::SessionAgent);
-        assert_eq!(agent.payload(), [0x01, 0x00, 0x01, 0x00, 0x01]);
+        assert_eq!(agent.payload(), [0x01, 0x00, 0x02, 0x00, 0x01]);
         let mut longer = agent.payload().to_vec();
         longer.extend([9; 6]);
         assert_eq!(Hello::decode(&longer), Ok(agent));
@@ -1156,15 +1207,18 @@ mod tests {
         );
         assert!(Hello::decode(&[1, 0, 1, 0]).is_err());
 
-        let service = Hello {
+        let service = Hello::this_release(Role::Service);
+        assert_eq!(service.agree(&agent), Some(2));
+        // An agent from the previous release, as during an upgrade.
+        let old_agent = Hello {
             min: 1,
-            max: 2,
-            role: Role::Service,
+            max: 1,
+            role: Role::SessionAgent,
         };
-        assert_eq!(service.agree(&agent), Some(1));
+        assert_eq!(service.agree(&old_agent), Some(1));
         let newer = Hello {
-            min: 2,
-            max: 3,
+            min: 3,
+            max: 4,
             role: Role::Service,
         };
         assert_eq!(newer.agree(&agent), None);
@@ -1287,6 +1341,80 @@ mod tests {
     #[test]
     fn registry_is_sorted_and_unique() {
         assert!(REGISTRY.windows(2).all(|w| w[0].ty < w[1].ty));
-        assert!(REGISTRY.iter().all(|i| i.ty != RESERVED && i.since == 1));
+        assert!(
+            REGISTRY
+                .iter()
+                .all(|i| i.ty != RESERVED && (1..=2).contains(&i.since))
+        );
+    }
+
+    #[test]
+    fn version_2_adds_only_the_image_runs() {
+        let added: Vec<_> = REGISTRY
+            .iter()
+            .filter(|i| i.since == 2)
+            .map(|i| (i.ty, i.name, i.direction))
+            .collect();
+        assert_eq!(
+            added,
+            [
+                (0x001a, "ClipboardImage", Direction::AgentToService),
+                (0x0029, "SetClipboardImage", Direction::ServiceToAgent),
+            ]
+        );
+        // Undefined at version 1, whatever the payload.
+        let len = 64u32.to_le_bytes();
+        assert_eq!(
+            ToService::decode(CLIPBOARD_IMAGE, &len, 1),
+            Err(ProtocolError::UnknownType {
+                ty: CLIPBOARD_IMAGE
+            })
+        );
+        assert_eq!(
+            ToAgentAny::decode(SET_CLIPBOARD_IMAGE, &len, 1),
+            Err(ProtocolError::UnknownType {
+                ty: SET_CLIPBOARD_IMAGE
+            })
+        );
+        // Defined, and round-tripping, at version 2.
+        for len in [8, MAX_IMAGE_LEN] {
+            let m = ToService::ClipboardImage(len);
+            assert_eq!(ToService::decode(m.ty(), &m.payload().unwrap(), 2), Ok(m));
+            let c = ClipboardToAgent::SetImage(len);
+            assert_eq!(
+                ToAgentAny::decode(c.ty(), &c.payload().unwrap(), 2),
+                Ok(ToAgentAny::Clipboard(c))
+            );
+        }
+        // Over the limit, either way.
+        let over = (MAX_IMAGE_LEN + 1).to_le_bytes();
+        assert_eq!(
+            ToService::decode(CLIPBOARD_IMAGE, &over, 2),
+            Err(ProtocolError::InvalidField {
+                ty: CLIPBOARD_IMAGE
+            })
+        );
+        assert!(
+            ToService::ClipboardImage(MAX_IMAGE_LEN + 1)
+                .payload()
+                .is_err()
+        );
+        assert!(
+            ClipboardToAgent::SetImage(MAX_IMAGE_LEN + 1)
+                .payload()
+                .is_err()
+        );
+        // Only the session agent may send an image run.
+        assert_eq!(
+            check_agent_role(CLIPBOARD_IMAGE, Role::WinlogonAgent),
+            Err(ProtocolError::WrongRole {
+                ty: CLIPBOARD_IMAGE,
+                role: 2
+            })
+        );
+        assert_eq!(
+            check_agent_role(CLIPBOARD_IMAGE, Role::SessionAgent),
+            Ok(())
+        );
     }
 }

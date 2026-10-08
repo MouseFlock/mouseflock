@@ -2,7 +2,8 @@
 //! message re-encodes to the same bytes. Deterministic, so it runs in
 //! `cargo test`; `tools/fuzz` covers the same driver with coverage guidance.
 
-use ipc::clipboard::{NotShared, RunAssembler};
+use ipc::IPC_VERSION;
+use ipc::clipboard::{Kind, NotShared, PNG_SIGNATURE, RunAssembler};
 use ipc::frame::{self, Decoded, HEADER_LEN};
 use ipc::message::{
     ClipboardToAgent, Hello, Role, ToAgent, ToAgentAny, ToService, check_agent_role,
@@ -39,7 +40,8 @@ impl Rng {
 /// errors are fine, panics are not.
 fn run_service(runs: &mut RunAssembler, m: &ToService) {
     let _ = match m {
-        ToService::ClipboardText(len) => runs.start(0x16, *len).map(|_| ()),
+        ToService::ClipboardText(len) => runs.start(0x16, Kind::Text, *len).map(|_| ()),
+        ToService::ClipboardImage(len) => runs.start(0x1a, Kind::Image, *len).map(|_| ()),
         ToService::ClipboardChunk(bytes) => runs.chunk(0x17, bytes).map(|_| ()),
         ToService::ClipboardNotShared(_) => runs.not_in_run(0x18),
         _ => Ok(()),
@@ -48,14 +50,17 @@ fn run_service(runs: &mut RunAssembler, m: &ToService) {
 
 fn run_agent(runs: &mut RunAssembler, m: &ClipboardToAgent) {
     let _ = match m {
-        ClipboardToAgent::Set(len) => runs.start(0x27, *len),
+        ClipboardToAgent::Set(len) => runs.start(0x27, Kind::Text, *len),
+        ClipboardToAgent::SetImage(len) => runs.start(0x29, Kind::Image, *len),
         ClipboardToAgent::Chunk(bytes) => runs.chunk(0x28, bytes),
     };
 }
 
-/// Decodes every frame in `input` as both ends would; decoded messages
-/// re-encode to the same payload.
+/// Decodes every frame in `input` as both ends of a link at this release's
+/// version would; decoded messages re-encode to the same payload. A type
+/// version 2 added never decodes at version 1.
 fn drive(input: &[u8]) {
+    const V: u16 = IPC_VERSION;
     let mut rest = input;
     let (mut service_runs, mut agent_runs) = (RunAssembler::default(), RunAssembler::default());
     loop {
@@ -64,25 +69,33 @@ fn drive(input: &[u8]) {
             Ok(Decoded::Frame { frame, consumed }) => {
                 assert!(consumed >= HEADER_LEN && consumed <= rest.len());
                 let _ = Hello::decode(frame.payload);
-                if let Ok(m) = ToService::decode(frame.ty, frame.payload, 1) {
+                if ToService::decode(frame.ty, frame.payload, 1).is_ok()
+                    || ToAgentAny::decode(frame.ty, frame.payload, 1).is_ok()
+                {
+                    assert!(
+                        frame.ty != 0x1a && frame.ty != 0x29,
+                        "image type decoded at version 1"
+                    );
+                }
+                if let Ok(m) = ToService::decode(frame.ty, frame.payload, V) {
                     assert_eq!(m.payload().unwrap(), frame.payload);
                     for role in [Role::SessionAgent, Role::WinlogonAgent] {
                         let _ = check_agent_role(frame.ty, role);
                     }
                     run_service(&mut service_runs, &m);
                 }
-                if let Ok(m) = ToAgent::decode(frame.ty, frame.payload, 1) {
+                if let Ok(m) = ToAgent::decode(frame.ty, frame.payload, V) {
                     assert_eq!(m.payload(), frame.payload);
                 }
-                if let Ok(ToAgentAny::Clipboard(m)) = ToAgentAny::decode(frame.ty, frame.payload, 1)
+                if let Ok(ToAgentAny::Clipboard(m)) = ToAgentAny::decode(frame.ty, frame.payload, V)
                 {
                     assert_eq!(m.payload().unwrap(), frame.payload);
                     run_agent(&mut agent_runs, &m);
                 }
-                if let Ok(m) = UiCommand::decode(frame.ty, frame.payload, 1) {
+                if let Ok(m) = UiCommand::decode(frame.ty, frame.payload, V) {
                     assert_eq!(m.payload().unwrap(), frame.payload);
                 }
-                if let Ok(m) = UiEvent::decode(frame.ty, frame.payload, 1) {
+                if let Ok(m) = UiEvent::decode(frame.ty, frame.payload, V) {
                     assert_eq!(m.payload().unwrap(), frame.payload);
                 }
                 rest = &rest[consumed..];
@@ -126,7 +139,33 @@ fn valid_frames(rng: &mut Rng) -> Vec<u8> {
         .encode_frame(&mut out)
         .unwrap();
     for _ in 0..rng.below(4) {
-        match rng.below(12) {
+        match rng.below(14) {
+            12 => {
+                let mut png = PNG_SIGNATURE.to_vec();
+                let extra = rng.below(20);
+                png.extend(rng.bytes(extra));
+                ToService::ClipboardImage(png.len() as u32)
+                    .encode_frame(&mut out)
+                    .unwrap();
+                for c in png.chunks(1 + rng.below(6)) {
+                    ToService::ClipboardChunk(c.to_vec())
+                        .encode_frame(&mut out)
+                        .unwrap();
+                }
+            }
+            13 => {
+                let mut png = PNG_SIGNATURE.to_vec();
+                let extra = rng.below(20);
+                png.extend(rng.bytes(extra));
+                ClipboardToAgent::SetImage(png.len() as u32)
+                    .encode_frame(&mut out)
+                    .unwrap();
+                for c in png.chunks(1 + rng.below(6)) {
+                    ClipboardToAgent::Chunk(c.to_vec())
+                        .encode_frame(&mut out)
+                        .unwrap();
+                }
+            }
             11 => ToService::InputDesktop(rng.below(2) == 0)
                 .encode_frame(&mut out)
                 .unwrap(),

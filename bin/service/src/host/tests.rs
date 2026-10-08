@@ -5,7 +5,7 @@
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
 
-use ipc::clipboard::NotShared;
+use ipc::clipboard::{NotShared, PNG_SIGNATURE};
 use ipc::link::{AgentEnd, AgentRole, FromService, ServiceEnd, ServiceHandle};
 use ipc::message::ToService;
 use model::{InputAction, InputEvent, Key, Monitor, MonitorId, Origin, Point, Rect, Screen};
@@ -44,6 +44,12 @@ struct Pc {
 }
 
 fn pc(name: &str, dir: PathBuf) -> Pc {
+    pc_speaking(name, dir, transport::Hello::this_release())
+}
+
+/// A machine whose node advertises `hello`'s version range: narrowed to 1–1,
+/// it stands in for a PC still running DeskHop 0.1.0.
+fn pc_speaking(name: &str, dir: PathBuf, hello: transport::Hello) -> Pc {
     let log = Log::memory();
     let stored = store::load(&dir, MachineName::new(name).unwrap(), &log).unwrap();
     let id = stored.machine.peer_id();
@@ -60,6 +66,7 @@ fn pc(name: &str, dir: PathBuf) -> Pc {
         default_route: Some(LOCAL),
     });
     node.addresses = stored.addresses;
+    node.hello = hello;
     let (reports_tx, reports) = mpsc::unbounded_channel();
     let (links, links_rx) = mpsc::unbounded_channel();
     let (uis, uis_rx) = mpsc::unbounded_channel();
@@ -186,8 +193,15 @@ struct Agent {
     commands: mpsc::UnboundedReceiver<FromService>,
     ended: oneshot::Receiver<()>,
     seen: Vec<ToAgent>,
-    /// Clipboard text the service told this agent to set, in order.
-    set: Vec<String>,
+    /// Copies the service told this agent to set, in order.
+    set: Vec<Set>,
+}
+
+/// A copy the service told an agent to set.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Set {
+    Text(String),
+    Image(Vec<u8>),
 }
 
 impl Agent {
@@ -236,7 +250,8 @@ impl Agent {
                     self.seen.push(c);
                     return Some(c);
                 }
-                Ok(Some(FromService::SetClipboard(text))) => self.set.push(text),
+                Ok(Some(FromService::SetClipboard(text))) => self.set.push(Set::Text(text)),
+                Ok(Some(FromService::SetClipboardImage(png))) => self.set.push(Set::Image(png)),
                 _ => return None,
             }
         }
@@ -254,18 +269,40 @@ impl Agent {
         self.reports.send_clipboard_text(text).unwrap();
     }
 
-    /// The next text the service tells this agent to put on the clipboard.
-    async fn set_text(&mut self) -> String {
+    /// Reports a copied image, as the agent does after the user copies one.
+    fn copy_image(&self, png: &[u8]) {
+        self.reports.send_clipboard_image(png).unwrap();
+    }
+
+    /// The next copy the service tells this agent to put on the clipboard.
+    async fn next_set(&mut self) -> Set {
         if !self.set.is_empty() {
             return self.set.remove(0);
         }
         let deadline = Instant::now() + WAIT;
         loop {
             match tokio::time::timeout_at(deadline, self.commands.recv()).await {
-                Ok(Some(FromService::SetClipboard(text))) => return text,
+                Ok(Some(FromService::SetClipboard(text))) => return Set::Text(text),
+                Ok(Some(FromService::SetClipboardImage(png))) => return Set::Image(png),
                 Ok(Some(FromService::Command(c))) => self.seen.push(c),
                 _ => panic!("no clipboard set; seen {:?}", self.seen),
             }
+        }
+    }
+
+    /// The next text the service tells this agent to put on the clipboard.
+    async fn set_text(&mut self) -> String {
+        match self.next_set().await {
+            Set::Text(text) => text,
+            Set::Image(png) => panic!("an image of {} bytes, not text", png.len()),
+        }
+    }
+
+    /// The next image the service tells this agent to put on the clipboard.
+    async fn set_image(&mut self) -> Vec<u8> {
+        match self.next_set().await {
+            Set::Image(png) => png,
+            Set::Text(text) => panic!("text {text:?}, not an image"),
         }
     }
 
@@ -277,6 +314,9 @@ impl Agent {
         while let Ok(Some(m)) = tokio::time::timeout_at(deadline, self.commands.recv()).await {
             match m {
                 FromService::SetClipboard(text) => panic!("unexpected clipboard set {text:?}"),
+                FromService::SetClipboardImage(png) => {
+                    panic!("unexpected image set, {} bytes", png.len())
+                }
                 FromService::Command(c) => self.seen.push(c),
             }
         }
@@ -1177,6 +1217,119 @@ async fn log_has_no_clipboard_text() {
     );
     for line in &lines {
         assert!(!line.contains("zq-deskhop"), "{line}");
+    }
+}
+
+// ---- images (add-clipboard-images 5.2) ----------------------------------------
+
+/// `len` bytes that start with the PNG signature: all the service checks.
+fn png_like(len: usize, fill: u8) -> Vec<u8> {
+    let mut bytes = vec![fill; len];
+    bytes[..8].copy_from_slice(&PNG_SIGNATURE);
+    bytes
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn screenshot_on_a_then_cross_sets_the_image_on_b() {
+    let (_a, _b, mut agent_a, mut agent_b) = linked().await;
+    let png = png_like(3 * 1024 * 1024, 0x5a);
+    agent_a.copy_image(&png);
+    settle().await;
+    agent_b.no_set_for(Duration::from_millis(100)).await;
+    cross_to_b(&mut agent_a, &mut agent_b).await;
+    // The same bytes, unparsed by either service.
+    assert!(
+        agent_b.set_image().await == png,
+        "the image arrived changed"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn text_after_an_image_wins() {
+    let (mut a, _b, mut agent_a, mut agent_b) = linked().await;
+    cross_to_b(&mut agent_a, &mut agent_b).await;
+    // An image on B, then text on A: A's text is the newest.
+    agent_b.copy_image(&png_like(64, 1));
+    settle().await;
+    b_takes_back(&mut a, &agent_b).await;
+    assert_eq!(agent_a.set_image().await, png_like(64, 1));
+    agent_a.copy("deskhop text after");
+    settle().await;
+    cross_to_b(&mut agent_a, &mut agent_b).await;
+    assert_eq!(agent_b.set_text().await, "deskhop text after");
+    agent_b.no_set_for(Duration::from_millis(300)).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn image_is_not_echoed() {
+    let (mut a, _b, mut agent_a, mut agent_b) = linked().await;
+    agent_a.copy_image(&png_like(4096, 2));
+    settle().await;
+    cross_to_b(&mut agent_a, &mut agent_b).await;
+    assert_eq!(agent_b.set_image().await, png_like(4096, 2));
+    b_takes_back(&mut a, &agent_b).await;
+    agent_a.no_set_for(Duration::from_millis(500)).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn member_running_0_1_0_gets_text_but_no_image_offers() {
+    let (mut a, mut old) = (
+        pc("A", temp_dir("mixed-a")),
+        pc_speaking(
+            "Old",
+            temp_dir("mixed-old"),
+            transport::Hello { min: 1, max: 1 },
+        ),
+    );
+    pair(&mut a, &mut old).await;
+    let mut agent_a = a.agent("A1").await;
+    let mut agent_old = old.agent("O1").await;
+    for agent in [&mut agent_a, &mut agent_old] {
+        assert_eq!(
+            agent.next().await,
+            ToAgent::SetCapture(CaptureMode::PassAll)
+        );
+    }
+    settle().await;
+
+    // An image on A is never offered to Old: crossing fetches nothing.
+    agent_a.copy_image(&png_like(64, 3));
+    settle().await;
+    cross_to_b(&mut agent_a, &mut agent_old).await;
+    agent_old.no_set_for(Duration::from_millis(500)).await;
+    // The connection stayed up, and text still crosses.
+    b_takes_back(&mut a, &agent_old).await;
+    agent_a.copy("deskhop text for old");
+    settle().await;
+    cross_to_b(&mut agent_a, &mut agent_old).await;
+    assert_eq!(agent_old.set_text().await, "deskhop text for old");
+    assert!(
+        !a.seen.iter().any(|r| matches!(r, Report::PeerDown { .. })),
+        "{:?}",
+        a.seen
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn log_has_no_image_bytes() {
+    let (a, b, mut agent_a, mut agent_b) = linked().await;
+    // Bytes that would show up in a log if any were written there.
+    let mut png = png_like(256, b'q');
+    png[8..32].copy_from_slice(b"zq-deskhop-image-7731xyz");
+    agent_a.copy_image(&png);
+    settle().await;
+    cross_to_b(&mut agent_a, &mut agent_b).await;
+    assert_eq!(agent_b.set_image().await, png);
+    let lines: Vec<String> = a.log.lines().into_iter().chain(b.log.lines()).collect();
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("clipboard: set image, 256 bytes")),
+        "{lines:#?}"
+    );
+    for line in &lines {
+        assert!(!line.contains("zq-deskhop"), "{line}");
+        assert!(!line.contains("qqqq"), "{line}");
     }
 }
 

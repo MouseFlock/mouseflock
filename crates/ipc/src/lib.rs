@@ -38,7 +38,7 @@ pub mod ui;
 pub use error::{EncodeError, ProtocolError};
 
 /// Highest IPC version this release speaks, exchanged in `Hello`.
-pub const IPC_VERSION: u16 = 1;
+pub const IPC_VERSION: u16 = 2;
 
 /// Lowest IPC version this release speaks.
 pub const MIN_IPC_VERSION: u16 = 1;

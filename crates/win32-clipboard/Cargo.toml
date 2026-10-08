@@ -6,6 +6,9 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[dependencies]
+png.workspace = true
+
 [dependencies.windows]
 workspace = true
 features = [

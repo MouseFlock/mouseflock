@@ -46,17 +46,22 @@ pub enum ProtocolError {
     SessionFailed,
     /// A clipboard transfer longer than the text limit.
     TextTooLong { len: u32 },
-    /// A clipboard-stream message out of order: a chunk before `ClipboardData`,
-    /// or a second `ClipboardData`.
+    /// A clipboard-stream message out of order: a chunk before the header, or
+    /// a second header.
     TransferOrder { ty: u16 },
     /// A `ClipboardChunk` with no bytes.
     EmptyChunk,
-    /// Clipboard chunks beyond the length `ClipboardData` announced.
+    /// Clipboard chunks beyond the length the header announced, text or image.
     TextOverrun,
-    /// A clipboard stream that ended before its announced length.
+    /// A clipboard stream, text or image, that ended before its announced
+    /// length.
     TextIncomplete { remaining: u32 },
     /// Clipboard text that is not UTF-8.
     TextNotUtf8,
+    /// An image clipboard transfer longer than the image limit.
+    ImageTooLong { len: u32 },
+    /// An image clipboard transfer that does not start with the PNG signature.
+    NotPng,
 }
 
 impl fmt::Display for ProtocolError {
@@ -107,6 +112,8 @@ impl fmt::Display for ProtocolError {
                 write!(f, "clipboard stream ended {remaining} bytes short")
             }
             Self::TextNotUtf8 => write!(f, "clipboard text is not UTF-8"),
+            Self::ImageTooLong { len } => write!(f, "clipboard image of {len} bytes over limit"),
+            Self::NotPng => write!(f, "clipboard image is not a PNG"),
         }
     }
 }

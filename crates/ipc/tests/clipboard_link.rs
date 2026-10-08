@@ -1,9 +1,9 @@
 //! Clipboard runs on the agent link, both ends over duplex streams (specs:
 //! agent-link, clipboard).
 
-use ipc::clipboard::{Copied, MAX_TEXT_LEN, NotShared};
+use ipc::clipboard::{Copied, MAX_IMAGE_LEN, MAX_TEXT_LEN, NotShared, PNG_SIGNATURE};
 use ipc::frame::{self, Decoded};
-use ipc::link::{AgentEnd, AgentRole, FromAgent, FromService, ServiceEnd};
+use ipc::link::{AgentEnd, AgentRole, FromAgent, FromService, ServiceEnd, SetClipboardError};
 use ipc::message::{Hello, Role, ToService};
 use model::{InputEvent, Key, Millis, Origin};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
@@ -188,4 +188,184 @@ async fn set_clipboard_reaches_agent() {
         Some(FromService::SetClipboard("world".into()))
     );
     assert_eq!(commands.recv().await, Some(FromService::SetClipboard(big)));
+}
+
+// ---- add-clipboard-images 3.1 --------------------------------------------
+
+fn png_like(len: usize) -> Vec<u8> {
+    let mut bytes = vec![0x42; len];
+    bytes[..8].copy_from_slice(&PNG_SIGNATURE);
+    bytes
+}
+
+/// A hand-driven agent whose `Hello` advertises `min..=max`.
+async fn raw_agent_at(
+    min: u16,
+    max: u16,
+) -> (ipc::link::AgentHandle, UnboundedReceiver<FromAgent>, Raw) {
+    let (a, b) = tokio::io::duplex(1 << 20);
+    let mut raw = Raw { s: b };
+    let mut out = Vec::new();
+    Hello {
+        min,
+        max,
+        role: Role::SessionAgent,
+    }
+    .encode_frame(&mut out)
+    .unwrap();
+    raw.s.write_all(&out).await.unwrap();
+    let (handle, events) = ServiceEnd::accept(a, AgentRole::Session, || Millis(0))
+        .await
+        .unwrap();
+    let mut buf = Vec::new();
+    while !matches!(frame::decode(&buf), Ok(Decoded::Frame { .. })) {
+        let mut chunk = [0u8; 256];
+        let n = raw.s.read(&mut chunk).await.unwrap();
+        buf.extend_from_slice(&chunk[..n]);
+    }
+    raw.report(ToService::Pong {
+        service: Millis(0),
+        agent: Millis(0),
+    })
+    .await;
+    (handle, events, raw)
+}
+
+#[tokio::test]
+async fn image_runs_reach_both_ends() {
+    let (a, b) = tokio::io::duplex(1 << 16);
+    let (service, agent) = tokio::join!(
+        ServiceEnd::accept(a, AgentRole::Session, || Millis(0)),
+        AgentEnd::connect(b, AgentRole::Session, || Millis(0)),
+    );
+    let ((handle, mut events), (reports, mut commands)) = (service.unwrap(), agent.unwrap());
+    assert_eq!((handle.version(), reports.version()), (2, 2));
+
+    let png = png_like(300_000);
+    reports.send_clipboard_image(&png).unwrap();
+    reports.send_clipboard_image(b"not a png at all").unwrap();
+    reports
+        .send_clipboard_image(&png_like(MAX_IMAGE_LEN as usize + 1))
+        .unwrap();
+    assert_eq!(
+        events.recv().await,
+        Some(FromAgent::Clipboard(Copied::Image(png.clone())))
+    );
+    assert_eq!(
+        events.recv().await,
+        Some(FromAgent::Clipboard(Copied::NotShared(NotShared::NoText)))
+    );
+    assert_eq!(
+        events.recv().await,
+        Some(FromAgent::Clipboard(Copied::NotShared(NotShared::TooLarge)))
+    );
+
+    handle.set_clipboard_image(&png).unwrap();
+    // Not a PNG, or over the limit: not sent at all.
+    handle.set_clipboard_image(b"GIF89a....").unwrap();
+    handle
+        .set_clipboard_image(&png_like(MAX_IMAGE_LEN as usize + 1))
+        .unwrap();
+    handle.set_clipboard("after").unwrap();
+    assert_eq!(
+        commands.recv().await,
+        Some(FromService::SetClipboardImage(png))
+    );
+    assert_eq!(
+        commands.recv().await,
+        Some(FromService::SetClipboard("after".into()))
+    );
+}
+
+#[tokio::test]
+async fn image_run_with_a_bad_signature_closes_link() {
+    let (_handle, mut events, mut raw) = raw_agent().await;
+    raw.report(ToService::ClipboardImage(16)).await;
+    // Split 3 + 13, the second chunk breaking the signature.
+    raw.report(ToService::ClipboardChunk(PNG_SIGNATURE[..3].to_vec()))
+        .await;
+    let mut rest = PNG_SIGNATURE[3..].to_vec();
+    rest[1] = b'X';
+    rest.extend([0; 8]);
+    raw.report(ToService::ClipboardChunk(rest)).await;
+    assert_eq!(events.recv().await, None);
+}
+
+#[tokio::test]
+async fn image_run_over_the_limit_closes_link() {
+    let (_handle, mut events, mut raw) = raw_agent().await;
+    raw.raw_frame(
+        ipc::message::CLIPBOARD_IMAGE,
+        &(MAX_IMAGE_LEN + 1).to_le_bytes(),
+    )
+    .await;
+    assert_eq!(events.recv().await, None);
+}
+
+#[tokio::test]
+async fn image_run_on_a_version_1_link_closes_it() {
+    let (handle, mut events, mut raw) = raw_agent_at(1, 1).await;
+    assert_eq!(handle.version(), 1);
+    raw.raw_frame(ipc::message::CLIPBOARD_IMAGE, &64u32.to_le_bytes())
+        .await;
+    assert_eq!(events.recv().await, None);
+}
+
+#[tokio::test]
+async fn version_1_agent_links_and_text_still_works() {
+    let (handle, mut events, mut raw) = raw_agent_at(1, 1).await;
+    assert_eq!(handle.version(), 1);
+    raw.report(ToService::ClipboardText(2)).await;
+    raw.report(ToService::ClipboardChunk(b"hi".to_vec())).await;
+    assert_eq!(
+        events.recv().await,
+        Some(FromAgent::Clipboard(Copied::Text("hi".into())))
+    );
+    // The service never sends an image to it.
+    assert_eq!(
+        handle.set_clipboard_image(&png_like(64)),
+        Err(SetClipboardError::NoImages)
+    );
+    handle.set_clipboard("still text").unwrap();
+}
+
+#[tokio::test]
+async fn agent_on_a_version_1_link_reports_images_as_no_text() {
+    // The agent end against a service that speaks only version 1.
+    let (a, b) = tokio::io::duplex(1 << 16);
+    let mut raw = Raw { s: a };
+    let mut out = Vec::new();
+    Hello {
+        min: 1,
+        max: 1,
+        role: Role::Service,
+    }
+    .encode_frame(&mut out)
+    .unwrap();
+    raw.s.write_all(&out).await.unwrap();
+    let (reports, _commands) = AgentEnd::connect(b, AgentRole::Session, || Millis(0))
+        .await
+        .unwrap();
+    assert_eq!(reports.version(), 1);
+    reports.send_clipboard_image(&png_like(64)).unwrap();
+
+    // The agent's Hello, then its report: `ClipboardNotShared(NoText)`.
+    let mut buf = Vec::new();
+    let mut frames = Vec::new();
+    while frames.len() < 2 {
+        let mut chunk = [0u8; 256];
+        let n = raw.s.read(&mut chunk).await.unwrap();
+        buf.extend_from_slice(&chunk[..n]);
+        while let Ok(Decoded::Frame { frame, consumed }) = frame::decode(&buf) {
+            frames.push((frame.ty, frame.payload.to_vec()));
+            buf.drain(..consumed);
+        }
+    }
+    assert_eq!(
+        frames[1],
+        (
+            ipc::message::CLIPBOARD_NOT_SHARED,
+            vec![NotShared::NoText.code()]
+        )
+    );
 }

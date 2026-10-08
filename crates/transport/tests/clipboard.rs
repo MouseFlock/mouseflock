@@ -9,12 +9,14 @@ use std::time::Duration;
 use harness::*;
 use model::{InputAction, Key, PeerId, PeerMessage};
 use pairing::{Identity, Machine, MachineName};
-use proto::clipboard::{self, ClipboardMessage, MAX_TEXT_LEN};
+use proto::clipboard::{
+    self, ClipKind, ClipboardMessage, MAX_IMAGE_LEN, MAX_TEXT_LEN, PNG_SIGNATURE,
+};
 use proto::hello::Hello;
 use proto::input::{InputMessage, KeyInput, Mark};
 use tokio::time::{Instant, timeout};
 use transport::tls::{ALPN_MEMBER, ALPN_PAIR, Expect};
-use transport::{Event, records_done_frame};
+use transport::{Contents, Event, records_done_frame};
 
 const WAIT: Duration = Duration::from_secs(10);
 
@@ -23,7 +25,7 @@ fn offer_from(peer: PeerId) -> impl Fn(&Event) -> bool {
 }
 
 fn text_from(peer: PeerId) -> impl Fn(&Event) -> bool {
-    move |e| matches!(e, Event::ClipboardText { peer: p, .. } if *p == peer)
+    move |e| matches!(e, Event::ClipboardData { peer: p, .. } if *p == peer)
 }
 
 /// A raw client that `a`'s machine counts as a member, and `a` started.
@@ -74,8 +76,8 @@ async fn up_client(
 #[tokio::test(flavor = "multi_thread")]
 async fn clipboard_offer_reaches_up_peer() {
     let (a, mut b) = connected_pair().await;
-    a.handle.offer_clipboard(PeerId([9; 32]), 1);
-    a.handle.offer_clipboard(b.id, 42);
+    a.handle.offer_clipboard(PeerId([9; 32]), 1, ClipKind::Text);
+    a.handle.offer_clipboard(b.id, 42, ClipKind::Text);
     let e = b.expect(WAIT, offer_from(a.id)).await;
     assert_eq!(e, Event::ClipboardOffer { peer: a.id, id: 42 });
 }
@@ -139,13 +141,20 @@ async fn text_transfers_on_its_own_stream() {
     let (a, mut b) = connected_pair().await;
     let big: Arc<str> = Arc::from("é".repeat(MAX_TEXT_LEN as usize / 2));
     assert_eq!(big.len(), MAX_TEXT_LEN as usize);
-    a.handle.send_clipboard(b.id, 7, big.clone());
-    a.handle.send_clipboard(b.id, 8, Arc::from("abc"));
+    a.handle
+        .send_clipboard(b.id, 7, Contents::Text(big.clone()));
+    a.handle
+        .send_clipboard(b.id, 8, Contents::Text(Arc::from("abc")));
     // Each transfer has a stream of its own; either may arrive first.
     let mut got = Vec::new();
     for _ in 0..2 {
-        let Event::ClipboardText { id, text, .. } = b.expect(WAIT, text_from(a.id)).await else {
-            unreachable!()
+        let Event::ClipboardData {
+            id,
+            contents: Contents::Text(text),
+            ..
+        } = b.expect(WAIT, text_from(a.id)).await
+        else {
+            panic!("not text")
         };
         got.push((id, text));
     }
@@ -238,10 +247,10 @@ async fn early_stream_is_held_until_records() {
     let e = a.expect(WAIT, text_from(peer)).await;
     assert_eq!(
         e,
-        Event::ClipboardText {
+        Event::ClipboardData {
             peer,
             id: 5,
-            text: Arc::from("early")
+            contents: Contents::Text(Arc::from("early"))
         }
     );
 }
@@ -284,11 +293,11 @@ async fn keys_arrive(
     loop {
         let e = a
             .expect(Duration::from_secs(2), |e| {
-                matches!(e, Event::Message { .. } | Event::ClipboardText { .. })
+                matches!(e, Event::Message { .. } | Event::ClipboardData { .. })
             })
             .await;
         match e {
-            Event::ClipboardText { .. } => panic!("text from {peer:?} arrived before the keys"),
+            Event::ClipboardData { .. } => panic!("a copy from {peer:?} arrived before the keys"),
             Event::Message { msg, .. } if msg == want => return start.elapsed(),
             _ => {}
         }
@@ -323,8 +332,253 @@ async fn input_not_delayed_by_transfer() {
         .expect("writing the second half stalled")
         .unwrap();
     stream.finish().unwrap();
-    let Event::ClipboardText { id, text, .. } = a.expect(WAIT, text_from(peer)).await else {
+    let Event::ClipboardData { id, contents, .. } = a.expect(WAIT, text_from(peer)).await else {
         unreachable!()
     };
-    assert_eq!((id, text.len()), (1, MAX_TEXT_LEN as usize));
+    assert_eq!((id, contents.bytes().len()), (1, MAX_TEXT_LEN as usize));
+}
+
+// ---- add-clipboard-images 2.1 --------------------------------------------
+
+/// `len` bytes that start with the PNG signature.
+fn png_like(len: usize) -> Vec<u8> {
+    let mut bytes = vec![0x42; len];
+    bytes[..8].copy_from_slice(&PNG_SIGNATURE);
+    bytes
+}
+
+fn image_transfer(id: u64, png: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    clipboard::encode_image_data(id, png.len() as u32, &mut out).unwrap();
+    for chunk in png.chunks(proto::frame::MAX_FRAME_PAYLOAD) {
+        clipboard::encode_chunk(chunk, &mut out).unwrap();
+    }
+    out
+}
+
+/// A node that advertises only protocol version 1, as DeskHop 0.1.0 does.
+fn old_node(machine: Machine) -> Node {
+    let mut c = config(machine);
+    c.hello = Hello { min: 1, max: 1 };
+    start(c)
+}
+
+/// `a` on this release, `old` on version 1 only, members and up.
+async fn mixed_pair() -> (Node, Node) {
+    let (mut a, mut old) = (machine("A"), machine("Old"));
+    befriend(&mut a, &mut old);
+    let (mut a, mut old) = (node(a), old_node(old));
+    a.sees(&old, false);
+    let (ida, idold) = (a.id, old.id);
+    a.up(idold).await;
+    old.up(ida).await;
+    (a, old)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn image_transfers_at_version_2() {
+    let (a, mut b) = connected_pair().await;
+    let png: Arc<[u8]> = Arc::from(png_like(1024 * 1024));
+    a.handle.offer_clipboard(b.id, 3, ClipKind::Image);
+    assert_eq!(
+        b.expect(WAIT, offer_from(a.id)).await,
+        Event::ClipboardOffer { peer: a.id, id: 3 }
+    );
+    a.handle
+        .send_clipboard(b.id, 3, Contents::Image(png.clone()));
+    let e = b.expect(WAIT, text_from(a.id)).await;
+    assert_eq!(
+        e,
+        Event::ClipboardData {
+            peer: a.id,
+            id: 3,
+            contents: Contents::Image(png)
+        }
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_version_1_peer_pairs_and_shares_text_but_never_images() {
+    // Pairing by code between this release and a node like 0.1.0.
+    let (mut a, mut old) = (node(machine("A")), old_node(machine("Old")));
+    pair(&mut old, &mut a).await;
+
+    // An image offer and an image transfer are dropped here, not sent.
+    a.handle.offer_clipboard(old.id, 1, ClipKind::Image);
+    a.handle
+        .send_clipboard(old.id, 1, Contents::Image(Arc::from(png_like(64))));
+    old.none_for(Duration::from_secs(1), |e| {
+        matches!(
+            e,
+            Event::ClipboardOffer { .. } | Event::ClipboardData { .. } | Event::PeerDown(..)
+        )
+    })
+    .await;
+
+    // The connection is still up, and text still works both ways.
+    a.handle.offer_clipboard(old.id, 2, ClipKind::Text);
+    assert_eq!(
+        old.expect(WAIT, offer_from(a.id)).await,
+        Event::ClipboardOffer { peer: a.id, id: 2 }
+    );
+    a.handle
+        .send_clipboard(old.id, 2, Contents::Text(Arc::from("hi")));
+    assert_eq!(
+        old.expect(WAIT, text_from(a.id)).await,
+        Event::ClipboardData {
+            peer: a.id,
+            id: 2,
+            contents: Contents::Text(Arc::from("hi"))
+        }
+    );
+    old.handle
+        .send_clipboard(a.id, 9, Contents::Text(Arc::from("back")));
+    assert_eq!(
+        a.expect(WAIT, text_from(old.id)).await,
+        Event::ClipboardData {
+            peer: old.id,
+            id: 9,
+            contents: Contents::Text(Arc::from("back"))
+        }
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn members_on_a_mixed_desk_stay_up() {
+    let (a, mut old) = mixed_pair().await;
+    a.handle.offer_clipboard(old.id, 1, ClipKind::Image);
+    old.none_for(Duration::from_millis(500), |e| {
+        matches!(e, Event::ClipboardOffer { .. } | Event::PeerDown(..))
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn image_header_on_a_version_1_connection_closes() {
+    let (client, a) = member_client("A");
+    let connection = client
+        .connect(a.addr, Expect::Peer(a.id), ALPN_MEMBER)
+        .await;
+    let (mut send, _recv) = connection.open_bi().await.unwrap();
+    let mut out = Vec::new();
+    Hello { min: 1, max: 1 }.encode_frame(&mut out).unwrap();
+    out.extend(records_done_frame());
+    send.write_all(&out).await.unwrap();
+    let mut stream = connection.open_uni().await.unwrap();
+    stream
+        .write_all(&image_transfer(1, &png_like(64)))
+        .await
+        .unwrap();
+    stream.finish().unwrap();
+    assert_eq!(close_code(&connection, WAIT).await, Some(1));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn oversized_or_non_png_image_closes() {
+    for oversized in [true, false] {
+        let (client, mut a) = member_client("A");
+        let (connection, _send, _recv) = up_client(&client, &mut a).await;
+        let mut stream = connection.open_uni().await.unwrap();
+        let out = if oversized {
+            let mut out = Vec::new();
+            clipboard::encode_image_data(1, MAX_IMAGE_LEN + 1, &mut out).unwrap();
+            out
+        } else {
+            let mut png = png_like(64);
+            png[1] = b'J';
+            image_transfer(1, &png)
+        };
+        stream.write_all(&out).await.unwrap();
+        let _ = stream.finish();
+        assert_eq!(
+            close_code(&connection, WAIT).await,
+            Some(1),
+            "oversized: {oversized}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn slow_transfer_reports_progress_at_most_once_a_second() {
+    let (client, mut a) = member_client("A");
+    let (connection, _send, _recv) = up_client(&client, &mut a).await;
+    let peer = client.identity.peer_id();
+    let png = png_like(20 * 1024 * 1024);
+    let all = image_transfer(4, &png);
+    let mut stream = connection.open_uni().await.unwrap();
+    // About 2.6 seconds of trickle, then the rest at once.
+    let writer = tokio::spawn(async move {
+        let pieces: Vec<&[u8]> = all.chunks(all.len() / 8).collect();
+        let (last, rest) = pieces.split_last().unwrap();
+        for piece in rest {
+            stream.write_all(piece).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(370)).await;
+        }
+        stream.write_all(last).await.unwrap();
+        stream.finish().unwrap();
+    });
+    let mut progress = Vec::new();
+    loop {
+        let e = a
+            .expect(WAIT, |e| {
+                matches!(
+                    e,
+                    Event::ClipboardProgress { .. } | Event::ClipboardData { .. }
+                )
+            })
+            .await;
+        match e {
+            Event::ClipboardProgress { peer: p, id } => {
+                assert_eq!((p, id), (peer, 4));
+                progress.push(Instant::now());
+            }
+            Event::ClipboardData { id, contents, .. } => {
+                assert_eq!(id, 4);
+                assert!(contents == Contents::Image(Arc::from(png)), "image changed");
+                break;
+            }
+            _ => unreachable!(),
+        }
+    }
+    writer.await.unwrap();
+    assert!(!progress.is_empty(), "no progress during a 2.6 s transfer");
+    for pair in progress.windows(2) {
+        let gap = pair[1] - pair[0];
+        // A little scheduling slack below the one-second floor.
+        assert!(gap >= Duration::from_millis(900), "progress {gap:?} apart");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn input_not_delayed_by_image_transfer() {
+    let (client, mut a) = member_client("A");
+    let (connection, mut control, _recv) = up_client(&client, &mut a).await;
+    let peer = client.identity.peer_id();
+    let alone = keys_arrive(&mut control, &mut a, peer, 0x52).await;
+
+    let all = image_transfer(1, &png_like(20 * 1024 * 1024));
+    let (first, second) = all.split_at(all.len() / 2);
+    let mut stream = connection.open_uni().await.unwrap();
+    timeout(WAIT, stream.write_all(first))
+        .await
+        .expect("writing the first half stalled")
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let during = keys_arrive(&mut control, &mut a, peer, 0x53).await;
+    assert!(
+        during < alone + Duration::from_millis(50),
+        "keys took {during:?} during an image transfer, {alone:?} alone"
+    );
+
+    timeout(WAIT, stream.write_all(second))
+        .await
+        .expect("writing the second half stalled")
+        .unwrap();
+    stream.finish().unwrap();
+    let Event::ClipboardData { id, contents, .. } = a.expect(WAIT, text_from(peer)).await else {
+        unreachable!()
+    };
+    assert_eq!(id, 1);
+    assert_eq!(contents.kind(), ClipKind::Image);
 }
