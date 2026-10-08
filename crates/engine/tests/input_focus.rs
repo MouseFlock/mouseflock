@@ -615,3 +615,95 @@ fn release_after_relink_is_dropped() {
     let out = desk.physical(A, key(Key::END, true));
     assert!(!sends(out.of(A), PeerMessage::SecureAttention), "{out:?}");
 }
+
+// ---- Bringing input home from the keyboard ----
+
+const SCROLL: Key = Key::SCROLL_LOCK;
+
+#[test]
+fn peer_is_unresponsive() {
+    // Forwarding to B, which injects nothing back: two Scroll Lock presses
+    // within the window bring focus home with no reply from B.
+    let mut desk = a_controls_b();
+    let first = desk.at(100).physical(A, key(SCROLL, true));
+    assert!(
+        first.is_quiet(),
+        "the first press does nothing visible: {first:?}"
+    );
+    let out = desk.at(300).physical(A, key(SCROLL, true));
+    assert_eq!(
+        out.of(A),
+        [
+            Decision::Send {
+                peer: B,
+                msg: PeerMessage::FocusWithdrawn
+            },
+            Decision::WarpCursor(Point::new(1919, 540)),
+            Decision::SetCapture(CaptureMode::PassAll),
+            Decision::FocusChanged(FocusView::Local),
+        ]
+    );
+    assert_eq!(desk.focus(A), FocusView::Local);
+}
+
+#[test]
+fn held_keys_released_on_return() {
+    let mut desk = a_controls_b();
+    // Ctrl is forwarded to B, which injects it as held.
+    let out = desk.physical(A, key(Key::LEFT_CTRL, true));
+    assert_eq!(
+        out.of(B),
+        [Decision::Inject(InputAction::Key {
+            key: Key::LEFT_CTRL,
+            down: true
+        })]
+    );
+    desk.at(100).physical(A, key(SCROLL, true));
+    let out = desk.at(300).physical(A, key(SCROLL, true));
+    assert!(sends(out.of(A), PeerMessage::FocusWithdrawn), "{out:?}");
+    assert_eq!(desk.focus(A), FocusView::Local);
+    // B releases the Ctrl it held and takes focus back.
+    assert!(
+        out.of(B).contains(&Decision::Inject(InputAction::Key {
+            key: Key::LEFT_CTRL,
+            down: false
+        })),
+        "{out:?}"
+    );
+}
+
+#[test]
+fn too_slow_is_not_a_trigger() {
+    let mut desk = a_controls_b();
+    let first = desk.at(100).physical(A, key(SCROLL, true));
+    let second = desk.at(900).physical(A, key(SCROLL, true));
+    assert!(first.is_quiet(), "{first:?}");
+    assert!(second.is_quiet(), "{second:?}");
+    assert_eq!(desk.focus(A), FocusView::Forwarding(B));
+}
+
+#[test]
+fn scroll_lock_not_sent_to_the_peer() {
+    let mut desk = a_controls_b();
+    let out = desk.physical(A, key(SCROLL, true));
+    assert!(
+        out.is_quiet(),
+        "nothing reaches B or this machine's OS: {out:?}"
+    );
+    assert_eq!(desk.focus(A), FocusView::Forwarding(B));
+    // Its release is swallowed too.
+    assert!(desk.physical(A, key(SCROLL, false)).is_quiet());
+}
+
+#[test]
+fn scroll_lock_works_locally() {
+    let mut desk = a_beside_b();
+    // With focus local the engine reports nothing, so the key reaches the OS.
+    let out = desk.physical(A, key(SCROLL, true));
+    assert!(out.is_quiet(), "{out:?}");
+    // A double press with local focus still does nothing to focus.
+    desk.at(100).physical(A, key(SCROLL, true));
+    let out = desk.at(300).physical(A, key(SCROLL, true));
+    assert!(out.is_quiet(), "{out:?}");
+    assert_eq!(desk.focus(A), FocusView::Local);
+}

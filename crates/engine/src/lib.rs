@@ -82,6 +82,8 @@ pub struct Tuning {
     pub burst_gap_ms: u64,
     pub takeover_ms: u64,
     pub undo_ms: u64,
+    /// Longest gap between the two Scroll Lock presses that bring input home.
+    pub home_gap_ms: u64,
 }
 
 impl Tuning {
@@ -92,6 +94,7 @@ impl Tuning {
         burst_gap_ms: 150,
         takeover_ms: 2000,
         undo_ms: 10_000,
+        home_gap_ms: 500,
     };
 }
 
@@ -287,6 +290,10 @@ pub struct Engine {
     /// Injected as pressed here on the controlling peer's behalf.
     injected: Held,
     push: Option<Push>,
+    /// When the last Scroll Lock press arrived while forwarding; a second
+    /// within `home_gap_ms` brings input home. Only meaningful while
+    /// forwarding, and cleared on every focus change.
+    last_home_key: Option<Millis>,
     out: Vec<Decision>,
 }
 
@@ -309,6 +316,7 @@ impl Engine {
             forwarded: Held::default(),
             injected: Held::default(),
             push: None,
+            last_home_key: None,
             out: Vec::new(),
         }
     }
@@ -459,9 +467,7 @@ impl Engine {
         if let Focus::Forwarding { to, exit } = self.focus
             && to == learned.peer
         {
-            self.forwarded.clear();
-            self.send(to, PeerMessage::FocusWithdrawn);
-            self.set_focus(Focus::Local, Some(exit));
+            self.withdraw_to_local(to, exit);
         }
         self.send(
             learned.peer,
@@ -485,7 +491,7 @@ impl Engine {
         }
         match (self.focus, origin) {
             (Focus::Local, Origin::Physical) => self.local_input(at, input),
-            (Focus::Forwarding { to, .. }, Origin::Physical) => self.forward(to, input),
+            (Focus::Forwarding { to, exit }, Origin::Physical) => self.forward(at, to, exit, input),
             (Focus::Controlled { .. }, Origin::Physical) => self.contested_input(at, input),
             (Focus::Controlled { by, .. }, Origin::Injected) => {
                 if let InputEvent::Motion { dx, dy, cursor } = input {
@@ -534,14 +540,31 @@ impl Engine {
         }
     }
 
-    /// Physical input while forwarding to `to`.
-    fn forward(&mut self, to: PeerId, input: InputEvent) {
+    /// Physical input while forwarding to `to`, whose entry the cursor left
+    /// at `exit`.
+    fn forward(&mut self, at: Millis, to: PeerId, exit: Point, input: InputEvent) {
         let action = match input {
             InputEvent::Key {
                 key: Key::END,
                 down: true,
             } if self.secure_attention_chord() => {
                 self.send(to, PeerMessage::SecureAttention);
+                return;
+            }
+            // Scroll Lock never reaches the peer; a second press within the
+            // window brings input home from this keyboard alone.
+            InputEvent::Key {
+                key: Key::SCROLL_LOCK,
+                down,
+            } => {
+                if down {
+                    match self.last_home_key {
+                        Some(last) if at.since(last) <= self.tuning.home_gap_ms => {
+                            self.withdraw_to_local(to, exit);
+                        }
+                        _ => self.last_home_key = Some(at),
+                    }
+                }
                 return;
             }
             InputEvent::Key { key, down } => InputAction::Key { key, down },
@@ -557,6 +580,15 @@ impl Engine {
     fn secure_attention_chord(&self) -> bool {
         self.physical_keys.iter().any(|k| k.is_ctrl())
             && self.physical_keys.iter().any(|k| k.is_alt())
+    }
+
+    /// Returns focus to this machine at `exit`, releasing what the peer held:
+    /// `FocusWithdrawn` tells the peer to release and take focus back, and the
+    /// return home does not wait for it.
+    fn withdraw_to_local(&mut self, to: PeerId, exit: Point) {
+        self.forwarded.clear();
+        self.send(to, PeerMessage::FocusWithdrawn);
+        self.set_focus(Focus::Local, Some(exit));
     }
 
     /// Physical input while a peer controls this machine.
@@ -843,6 +875,7 @@ impl Engine {
         let before = (self.capture(), self.focus());
         self.focus = focus;
         self.push = None;
+        self.last_home_key = None;
         if let Some(p) = warp {
             self.out.push(Decision::WarpCursor(p));
         }
