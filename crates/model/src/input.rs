@@ -15,6 +15,7 @@ pub struct Key(pub u16);
 
 impl Key {
     pub const END: Key = Key(0x4d);
+    pub const SCROLL_LOCK: Key = Key(0x47);
     pub const LEFT_CTRL: Key = Key(0xe0);
     pub const LEFT_SHIFT: Key = Key(0xe1);
     pub const LEFT_ALT: Key = Key(0xe2);
