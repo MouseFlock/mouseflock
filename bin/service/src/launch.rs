@@ -83,6 +83,11 @@ pub struct Watch {
     pub id: u32,
     /// The privileges the winlogon agent's token holds, for the log.
     pub privileges: Option<Vec<String>>,
+    /// Whether the session agent was launched with UI access; `None` for the
+    /// winlogon agent, which never has it.
+    pub ui_access: Option<bool>,
+    /// Why UI access was not given, to log once (add-elevated-windows D4).
+    pub ui_access_note: Option<String>,
     kill: Kill,
     /// Resolves with the exit code when the process exits.
     pub exited: oneshot::Receiver<Option<u32>>,
@@ -145,9 +150,33 @@ pub fn desktop(role: AgentRole) -> Desktop {
 pub fn agent(role: AgentRole, target: Target) -> Result<(Watch, NamedPipeServer), LaunchError> {
     let exe = agent_path().map_err(failed("cannot find the agent"))?;
     let dir = exe.parent().map(PathBuf::from).unwrap_or_default();
+    // The session agent in a session is launched with UI access and shielded
+    // (add-elevated-windows D2, D4); if Windows refuses, it falls back to a
+    // plain launch, works with every window but elevated ones, and says why
+    // once. `ui_access` is `None` for the winlogon agent, which never has it.
+    let mut ui_access: Option<bool> = None;
+    let mut ui_access_note: Option<String> = None;
+    let mut shield = false;
     let token = match (role, target) {
-        (AgentRole::Session, Target::Session(session)) => Some(win32_session::user_token(session)?),
-        (AgentRole::Session, Target::Console) => None,
+        (AgentRole::Session, Target::Session(session)) => {
+            match win32_session::ui_access_token(session) {
+                Ok(token) => {
+                    ui_access = Some(true);
+                    shield = true;
+                    Some(token)
+                }
+                Err(win32_session::UiAccessError::NoUser) => return Err(LaunchError::NoUser),
+                Err(e) => {
+                    ui_access = Some(false);
+                    ui_access_note = Some(e.to_string());
+                    Some(win32_session::user_token(session)?)
+                }
+            }
+        }
+        (AgentRole::Session, Target::Console) => {
+            ui_access = Some(false);
+            None
+        }
         (AgentRole::Winlogon, Target::Session(session)) => Some(
             win32_session::system_token(session)
                 .map_err(failed("cannot make the winlogon agent's token"))?,
@@ -180,10 +209,22 @@ pub fn agent(role: AgentRole, target: Target) -> Result<(Watch, NamedPipeServer)
         Some(token) => {
             let privileges =
                 (role == AgentRole::Winlogon).then(|| token.privileges().unwrap_or_default());
-            let process = Arc::new(
-                win32_session::launch_as(&token, &exe, &args, &dir, desktop(role))
-                    .map_err(failed("cannot launch the agent"))?,
-            );
+            let shield_sid = shield.then_some(&user);
+            let launched =
+                win32_session::launch_as(&token, &exe, &args, &dir, desktop(role), shield_sid);
+            // A shielded launch that Windows rejects falls back to a plain one,
+            // so the agent still runs, without elevated windows.
+            let process = match (launched, shield) {
+                (Ok(p), _) => p,
+                (Err(e), true) => {
+                    ui_access = Some(false);
+                    ui_access_note = Some(format!("shielded launch failed: {e}"));
+                    win32_session::launch_as(&token, &exe, &args, &dir, desktop(role), None)
+                        .map_err(failed("cannot launch the agent"))?
+                }
+                (Err(e), false) => return Err(failed("cannot launch the agent")(e)),
+            };
+            let process = Arc::new(process);
             let (tx, exited) = oneshot::channel();
             let waiting = process.clone();
             tokio::task::spawn_blocking(move || {
@@ -192,6 +233,8 @@ pub fn agent(role: AgentRole, target: Target) -> Result<(Watch, NamedPipeServer)
             Watch {
                 id: process.id(),
                 privileges,
+                ui_access,
+                ui_access_note,
                 kill: Kill::Session(process),
                 exited,
             }
@@ -220,6 +263,8 @@ pub fn agent(role: AgentRole, target: Target) -> Result<(Watch, NamedPipeServer)
             Watch {
                 id,
                 privileges: None,
+                ui_access,
+                ui_access_note: None,
                 kill: Kill::Console(Some(kill)),
                 exited,
             }

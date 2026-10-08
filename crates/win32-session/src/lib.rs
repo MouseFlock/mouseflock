@@ -10,14 +10,15 @@
 //! |---|---|
 //! | [`active_console_session`], [`user_token`], [`Token::user_sid`], [`own_sid`] | which session and user get an agent |
 //! | [`system_token`], [`Token::privileges`] | the winlogon agent's SYSTEM token, privileges removed |
-//! | [`launch_as`], [`Desktop`], [`Process`] | starting an agent as its user, on its desktop |
+//! | [`ui_access_token`], [`Token::ui_access`], [`Token::integrity`] | the session agent's UI-access token, so it can drive the user's elevated windows |
+//! | [`launch_as`], [`Desktop`], [`Process`] | starting an agent as its user, on its desktop, optionally shielded |
 //! | [`create_agent_pipe`], [`create_ui_pipe`], [`client_process_id`], [`client_session_id`] | the agent's and the UI's pipes, and who connected |
 //! | [`secure_folder`], [`create_admin_readable`], [`remove_secure_folder`] | the service's data folder, its log, and removing it on uninstall |
 //! | [`sas_policy`], [`send_sas`] | the secure attention screen |
 //!
-//! Calls that need SYSTEM (`user_token`, `system_token`, `launch_as` with
-//! either token, `secure_folder`) fail with an error, never a panic, when
-//! run as anyone else.
+//! Calls that need SYSTEM (`user_token`, `system_token`, `ui_access_token`,
+//! `launch_as` with either token, `secure_folder`) fail with an error, never
+//! a panic, when run as anyone else.
 
 mod folder;
 mod handle;
@@ -36,5 +37,6 @@ pub use process::{Desktop, Process, command_line, launch_as};
 pub use sas::{SAS_POLICY_KEY, SAS_POLICY_VALUE, allows_services, sas_policy, send_sas};
 pub use sid::{ADMINISTRATORS, GUESTS, SYSTEM, Sid, is_trusted_owner};
 pub use token::{
-    SessionId, Token, TokenError, active_console_session, own_sid, system_token, user_token,
+    SessionId, Token, TokenError, UiAccessError, active_console_session, own_sid, system_token,
+    ui_access_token, user_token,
 };

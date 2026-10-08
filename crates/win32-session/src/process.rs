@@ -12,7 +12,32 @@ use windows::Win32::System::Threading::{
 use windows::core::{PCWSTR, PWSTR};
 
 use crate::handle::{Owned, wide};
+use crate::pipe::Descriptor;
+use crate::sid::Sid;
 use crate::token::Token;
+
+/// The integrity level SID one above medium, "Medium Plus"
+/// (`S-1-16-8448`, RID `0x2100`). A process at this level is above every
+/// unelevated program, so their messages and write-type handle opens are
+/// blocked, without looking elevated (add-elevated-windows D3).
+pub const MEDIUM_PLUS_SID: &str = "S-1-16-8448";
+
+/// The DACL and mandatory label for a shielded agent process and its main
+/// thread (add-elevated-windows D3). SYSTEM keeps full access; `user` may
+/// only wait on it, read limited information, and terminate it; the owner
+/// (also `user`) is granted nothing beyond that, removing the implicit
+/// right to rewrite the DACL; and a no-write-up label at Medium Plus blocks
+/// lower-integrity processes from tampering whatever the DACL says.
+///
+/// This locks the process down, so a program running as the same user cannot
+/// drive the UI-access agent. It grants no new power to anyone.
+pub fn shielded_process_sddl(user: &Sid) -> String {
+    // SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE.
+    const USER_RIGHTS: u32 = 0x0010_0000 | 0x1000 | 0x0001;
+    format!(
+        "O:{user}G:{user}D:P(A;;FA;;;SY)(A;;0x{USER_RIGHTS:x};;;{user})(A;;;;;OW)S:(ML;;NW;;;{MEDIUM_PLUS_SID})"
+    )
+}
 
 /// A launched process. Its handle stays open for this value's lifetime, so
 /// its process ID cannot be reused by another process meanwhile.
@@ -117,14 +142,20 @@ impl Desktop {
 
 /// Launches `exe` with `args` as `token`'s user, on `desktop` in the
 /// token's session, without a window and with that user's environment. No
-/// handles are inherited.
+/// handles are inherited. When `shield` names a user, the new process and
+/// its main thread get [`shielded_process_sddl`] for that user, keeping the
+/// user's other programs from tampering with the agent.
 pub fn launch_as(
     token: &Token,
     exe: &Path,
     args: &[&str],
     dir: &Path,
     desktop: Desktop,
+    shield: Option<&Sid>,
 ) -> io::Result<Process> {
+    let shield = shield
+        .map(|user| Descriptor::from_sddl(&shielded_process_sddl(user)))
+        .transpose()?;
     let app = wide(exe);
     let mut line = wide(command_line(exe, args));
     let cwd = wide(dir);
@@ -139,17 +170,22 @@ pub fn launch_as(
         lpDesktop: PWSTR(desktop.as_mut_ptr()),
         ..Default::default()
     };
+    // Same descriptor for the process and its main thread; it outlives the
+    // call, and the pointer is Copy so it serves both parameters.
+    let attrs = shield.as_ref().map(Descriptor::attributes);
+    let attrs_ptr = attrs.as_ref().map(std::ptr::from_ref);
     let mut info = PROCESS_INFORMATION::default();
     // SAFETY: every string is NUL-terminated and outlives the call; the
     // command line is writable as the API requires; `env` is a Unicode
-    // environment block, flagged as such.
+    // environment block, flagged as such; `attrs`, when present, is a valid
+    // SECURITY_ATTRIBUTES whose descriptor outlives the call.
     let launched = unsafe {
         CreateProcessAsUserW(
             Some(token.handle()),
             PCWSTR(app.as_ptr()),
             Some(PWSTR(line.as_mut_ptr())),
-            None,
-            None,
+            attrs_ptr,
+            attrs_ptr,
             false,
             CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW,
             Some(env),
@@ -211,8 +247,25 @@ mod tests {
             &[],
             Path::new(r"C:\"),
             Desktop::Default,
+            None,
         ) {
             assert_eq!(p.wait().unwrap(), 0);
         }
+    }
+
+    #[test]
+    fn shield_sddl_names_system_the_user_and_a_medium_plus_label() {
+        let user = Sid::parse("S-1-5-21-1-2-3-1001").unwrap();
+        let sddl = shielded_process_sddl(&user);
+        assert_eq!(
+            sddl,
+            "O:S-1-5-21-1-2-3-1001G:S-1-5-21-1-2-3-1001D:P\
+             (A;;FA;;;SY)(A;;0x101001;;;S-1-5-21-1-2-3-1001)(A;;;;;OW)\
+             S:(ML;;NW;;;S-1-16-8448)"
+        );
+        // SYSTEM full, the user limited, owner-rights nothing: three ACEs.
+        assert_eq!(sddl.matches("(A;").count(), 3);
+        // It parses into a real descriptor.
+        Descriptor::from_sddl(&sddl).unwrap();
     }
 }

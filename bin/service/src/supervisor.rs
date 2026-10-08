@@ -388,6 +388,15 @@ pub async fn run(
             "no {agent} in console mode: it needs the registered service"
         );
     }
+    if console && role == AgentRole::Session {
+        info!(
+            log,
+            "no elevated windows in console mode: they need the registered service"
+        );
+    }
+    // The UI-access fallback reason is logged once per service run, not on
+    // every relaunch (add-elevated-windows D4).
+    let mut ui_access_noted = false;
     let mut actions = plan.set_target(find_target(role, console, Some(&log)), now());
     // Session notifications can arrive before Windows reports the new
     // console session, as when signing out moves the logon screen to a new
@@ -402,14 +411,27 @@ pub async fn run(
                     Ok((watch, pipe)) => {
                         generation += 1;
                         let g = generation;
-                        match &watch.privileges {
-                            Some(p) => info!(
+                        match (&watch.privileges, watch.ui_access) {
+                            (Some(p), _) => info!(
                                 log,
                                 "launched {agent} {} in {target}, privileges: {}",
                                 watch.id,
                                 p.join(", ")
                             ),
-                            None => info!(log, "launched {agent} {} in {target}", watch.id),
+                            (None, Some(ui)) => info!(
+                                log,
+                                "launched {agent} {} in {target}, UI access: {}",
+                                watch.id,
+                                if ui { "yes" } else { "no" }
+                            ),
+                            (None, None) => {
+                                info!(log, "launched {agent} {} in {target}", watch.id)
+                            }
+                        }
+                        if let Some(note) = &watch.ui_access_note
+                            && note_once(&mut ui_access_noted)
+                        {
+                            warn!(log, "elevated windows unavailable: {note}");
                         }
                         let tx = internal_tx.clone();
                         let expected = watch.id;
@@ -497,6 +519,17 @@ pub async fn run(
     }
 }
 
+/// Flips `noted` true and returns true the first time only, so the UI-access
+/// fallback reason is logged once per service run (add-elevated-windows D4).
+fn note_once(noted: &mut bool) -> bool {
+    if *noted {
+        false
+    } else {
+        *noted = true;
+        true
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -507,6 +540,14 @@ mod tests {
 
     fn ms(n: u64) -> Duration {
         Duration::from_millis(n)
+    }
+
+    #[test]
+    fn note_once_fires_only_the_first_time() {
+        let mut noted = false;
+        assert!(note_once(&mut noted));
+        assert!(!note_once(&mut noted));
+        assert!(!note_once(&mut noted));
     }
 
     fn secs(n: u64) -> Duration {

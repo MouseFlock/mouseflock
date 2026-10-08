@@ -1,6 +1,6 @@
 # DeskHop threat model
 
-*Status: covers the wire, pairing, desk membership, the LAN transport, forwarded input, the agent → service and UI → service pipes, the UI app, the clipboard (text and images, including untrusted image data), the service's data folder, console mode, secure attention, the secure desktop, and installing and uninstalling. Elevated windows on the user's desktop are a known gap, left to a later change.*
+*Status: covers the wire, pairing, desk membership, the LAN transport, forwarded input, the agent → service and UI → service pipes, the UI app, the clipboard (text and images, including untrusted image data), the service's data folder, console mode, secure attention, the secure desktop, elevated windows on the user's desktop, and installing and uninstalling.*
 
 DeskHop injects keystrokes received over the network, and its service runs as SYSTEM. This document records what it defends against and where.
 
@@ -211,7 +211,21 @@ Windows shows UAC prompts, the lock screen and the logon screen on the secure de
 Residual risks:
 - A compromised member that controls a machine while a UAC consent prompt is up can approve it. Removing the member ends that.
 - A session switch ends the winlogon agent and launches a new one in the new console session, within a second or two. Until then, input cannot reach that session's secure desktop.
-- Elevated windows on the user's desktop run at high integrity. There the medium-integrity session agent cannot inject, and its hooks may not see input. This is unchanged by this change and left to a later one.
+
+### Elevated windows (UI access)
+
+Windows shows admin windows — an elevated terminal, Task Manager, a window a UAC prompt opened — at high integrity, where a medium-integrity process may not inject input or hook. So the service gives the session agent UI access, the flag accessibility software carries, so it can work with the user's elevated windows (ADR 0008). Specified in `openspec/specs/session-agents/spec.md`.
+
+- **Granted by the service, through the token.** The service copies the user's token, raises it to Medium Plus integrity, and sets `TokenUIAccess`, which needs SYSTEM's `SeTcbPrivilege`. No code signing is involved, and the agent still runs as the user with no added privilege. UI access lets a process work with higher-integrity windows; it is not a right to act as anyone else.
+- **The agent is shielded, so it cannot be hijacked.** A UI-access process that the user's own programs could drive would let malware running as the user reach admin windows through it. So the agent runs at Medium Plus, above every unelevated program, behind a process and thread security descriptor that grants the user only synchronize, query-limited information and terminate, and nothing to the owner beyond that. Mandatory integrity and UIPI then deny a lower process the right to write its memory, create threads in it, change its security, or message its windows. The one exception is the setting-change broadcast Windows sends after a scaling change, which the screen window allows through so the agent still tracks monitors.
+- **It fails safe.** If Windows refuses UI access or the raised integrity, the service launches the agent plain, as before, logs why once, and the agent works with every window but elevated ones. Console mode never has UI access.
+- **The token stays in `win32-session`,** linked only by `bin/service`, and the launch goes through the one launch function.
+
+Residual risks:
+
+- **A member controlling a machine can now type into its elevated windows.** That is what the user's own keyboard at that machine can do, and a member could already answer its UAC prompts through the winlogon agent. Removing the member ends it.
+- **An elevated process running as the user can still tamper with the agent,** since it is at or above Medium Plus. Such a process is already an administrator on that machine.
+- **The flag is set in a way Windows does not document as supported for unsigned callers.** A future build could stop honoring it; the agent then falls back to the plain launch, logged once, and the signed-manifest route remains open.
 
 ### Install and uninstall
 
