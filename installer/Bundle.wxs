@@ -12,7 +12,7 @@
           Version="$(ProductVersion)"
           UpgradeCode="{E4D0472E-4507-4CAE-AB65-46A95D7B545A}"
           IconSourceFile="$(Icon)"
-          AboutUrl="https://github.com/sharatk/DeskHop">
+          AboutUrl="https://github.com/deskhop/DeskHop">
 
     <!--
       Install, progress, then success with Launch. No licence to accept and no
