@@ -3,15 +3,16 @@
 //! design D7).
 //!
 //! Both kinds run the same loop. The session agent also watches and sets
-//! the clipboard, text and images; the winlogon agent, on the secure desktop, never touches
-//! the clipboard and instead reports whether its desktop is the input
-//! desktop.
+//! the clipboard, text, images and files (see `files`); the winlogon agent,
+//! on the secure desktop, never touches the clipboard and instead reports
+//! whether its desktop is the input desktop.
 //!
 //! Capture starts only after the `Hello` exchange, and the link ending ends
 //! capture: the `Capture` is dropped, which returns to pass-all and removes
 //! the hooks, before the process exits.
 
 use std::process::ExitCode;
+use std::sync::Arc;
 use std::time::Duration;
 
 use ipc::clipboard::NotShared;
@@ -22,6 +23,8 @@ use tokio::sync::mpsc;
 use tokio::time::Instant;
 use win32_clipboard::Copied;
 use win32_input::{Capture, Captured, Options};
+
+use crate::files::Files;
 
 /// `ERROR_PIPE_BUSY`: every instance of the pipe is in use.
 const ERROR_PIPE_BUSY: i32 = 231;
@@ -70,7 +73,7 @@ async fn link(pipe: &str, role: AgentRole) -> ExitCode {
         }
     };
     let (reports, mut commands) = match AgentEnd::connect(stream, role, win32_input::now).await {
-        Ok(v) => v,
+        Ok((reports, commands)) => (Arc::new(reports), commands),
         Err(e) => {
             eprintln!("deskhop-agent: {e}");
             return ExitCode::from(NO_HANDSHAKE);
@@ -103,6 +106,7 @@ async fn link(pipe: &str, role: AgentRole) -> ExitCode {
         },
         AgentRole::Winlogon => (None, mpsc::unbounded_channel().1),
     };
+    let (mut files, mut served) = Files::new(reports.clone());
 
     loop {
         tokio::select! {
@@ -120,8 +124,13 @@ async fn link(pipe: &str, role: AgentRole) -> ExitCode {
                         c.set_image(png);
                     }
                 }
+                Some(FromService::SetClipboardFiles { set, manifest }) => {
+                    files.set(set, &manifest, clipboard.as_ref());
+                }
+                Some(file_message) => files.on(file_message),
                 None => break,
             },
+            Some(()) = served.recv() => files.served(),
             event = events.recv() => {
                 let Some(event) = event else { break };
                 if reports.send(report(event)).is_err() {
@@ -129,7 +138,7 @@ async fn link(pipe: &str, role: AgentRole) -> ExitCode {
                 }
             }
             Some(copied) = copies.recv() => {
-                if report_copy(&reports, copied).is_err() {
+                if report_copy(&reports, &mut files, copied).is_err() {
                     break;
                 }
             }
@@ -155,12 +164,20 @@ fn bridge<T: Send + 'static>(from: std::sync::mpsc::Receiver<T>) -> mpsc::Unboun
     rx
 }
 
-/// Reports a settled copy: its text or image as a run, or why it is not
-/// shared. On a link that agreed IPC version 1, an image is reported as
-/// neither text nor an image. A received image that could not be set is
-/// logged here and reported to no one.
-fn report_copy(reports: &ServiceHandle, copied: Copied) -> Result<(), Closed> {
+/// Reports a settled copy: its text, image or files as a run, or why it is
+/// not shared. On a link before the version that defines a kind, the copy is
+/// reported as neither text nor an image. A received image that could not be
+/// set is logged here and reported to no one. A copy other than files means
+/// the held file copy is served no more.
+fn report_copy(reports: &ServiceHandle, files: &mut Files, copied: Copied) -> Result<(), Closed> {
+    if let Copied::Files(copy) = copied {
+        return files.report(copy);
+    }
+    if !matches!(copied, Copied::NotSet(_)) {
+        files.forget();
+    }
     let why = match copied {
+        Copied::Files(_) => return Ok(()),
         Copied::Text(text) => return reports.send_clipboard_text(&text),
         Copied::Image(png) => return reports.send_clipboard_image(&png),
         Copied::Private => NotShared::Private,

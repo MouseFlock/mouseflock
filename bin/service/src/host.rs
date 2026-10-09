@@ -18,16 +18,18 @@ use ipc::ui::{
 };
 use model::{LayoutBook, Millis, PeerId, Side};
 use pairing::{Code, CodeError, Desk, JoinFailure, MachineName, ModeClosed, WINDOW_MS};
+use proto::clipboard::ClipKind;
 use rand_core::{OsRng, RngCore};
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::Instant;
-use transport::{Contents, Down, Event as NodeEvent, NoNetwork, NodeHandle, StartError};
+use transport::{Contents, Down, Event as NodeEvent, FileChunk, NoNetwork, NodeHandle, StartError};
 
 use crate::clipboard::{self, Tracker};
 use crate::launch;
 use crate::log::Log;
 use crate::store::{self, StoreHandle};
 use crate::{info, warn};
+use files::{Out, Relay, Relayed};
 use routing::{Effect, Routing};
 
 /// How long goodbye may take before sleep or stop.
@@ -211,6 +213,7 @@ pub fn start(
         dirty: false,
         focus: FocusView::Local,
         clipboard: Tracker::default(),
+        files: Relay::default(),
     };
     let task = tokio::spawn(host.run(node_events, links, uis, from_ui_rx, commands));
     Ok(Running { node, task })
@@ -247,6 +250,8 @@ struct Host {
     focus: FocusView,
     /// Which copy is newest and what to fetch or serve. Never logged.
     clipboard: Tracker,
+    /// File bytes on their way between the session agent and members.
+    files: Relay,
 }
 
 /// The next event from the current link, or `None` when it ends. Pends
@@ -290,6 +295,7 @@ impl Host {
                     None => self.link_ended(AgentRole::Winlogon, "its link closed"),
                 },
                 Some(link) = links.recv() => self.new_link(link),
+                relayed = self.files.next() => self.on_relayed(relayed),
                 command = commands.recv() => match command {
                     Some(HostCommand::Stop(done)) => {
                         self.stop().await;
@@ -479,6 +485,9 @@ impl Host {
         }
         let mode = mode_for(self.engine.focus());
         let _ = link.handle.send(ToAgent::SetCapture(mode));
+        if role == AgentRole::Session {
+            self.files = Relay::default();
+        }
         *self.slot(role) = Some(link);
         self.routing.linked(role);
         self.dirty = true;
@@ -491,6 +500,11 @@ impl Host {
             return;
         }
         self.dirty = true;
+        if role == AgentRole::Session {
+            // Its files go no further: members' pastes of them fail, and so
+            // does its own paste.
+            self.files = Relay::default();
+        }
         info!(self.log, "{} link ended: {why}", launch::name(role));
         self.report(Report::AgentGone(role));
         let effects = self.routing.ended(role);
@@ -550,6 +564,191 @@ impl Host {
                 info!(self.log, "clipboard: copy not shared ({why:?})");
                 self.clipboard.local_not_shared();
             }
+            FromAgent::ClipboardFiles { copy, manifest } => self.local_files(copy, manifest),
+            event => self.on_agent_file(event),
+        }
+    }
+
+    /// The agent reported a file copy. The service trusts no agent: a
+    /// manifest that breaks a rule is treated as a copy not shared.
+    fn local_files(&mut self, copy: u32, manifest: Vec<u8>) {
+        if proto::files::Manifest::parse(&manifest).is_err() {
+            warn!(
+                self.log,
+                "clipboard: the agent reported a malformed file copy"
+            );
+            self.clipboard.local_not_shared();
+            return;
+        }
+        let contents = Contents::Files(Arc::from(manifest));
+        let id = OsRng.next_u64();
+        info!(self.log, "clipboard: offered {}", describe(&contents));
+        self.clipboard.local_files(id, contents, copy);
+        for &peer in &self.up {
+            self.node.offer_clipboard(peer, id, ClipKind::Files);
+        }
+    }
+
+    /// A file message from the session agent (add-clipboard-files D4).
+    fn on_agent_file(&mut self, event: FromAgent) {
+        let Some(link) = &self.session else {
+            return;
+        };
+        let agent = &link.handle;
+        match event {
+            // The agent pastes a member's file.
+            FromAgent::FileWanted { set, index } => {
+                self.files.incoming = None;
+                match self.clipboard.wanted(set) {
+                    Some((peer, id)) => {
+                        info!(
+                            self.log,
+                            "clipboard: pasting a file from {}",
+                            self.name(peer)
+                        );
+                        let fetch = self.node.request_file(peer, id, index);
+                        self.files.incoming = Some(files::In { index, fetch });
+                    }
+                    None => {
+                        let _ = agent.abandon_file(index);
+                    }
+                }
+            }
+            FromAgent::FileUnwanted { index } => {
+                if self
+                    .files
+                    .incoming
+                    .as_ref()
+                    .is_some_and(|i| i.index == index)
+                {
+                    self.files.incoming = None;
+                }
+                let _ = agent.abandon_file(index);
+            }
+            FromAgent::FileConsumed(n) => self.files.to_agent.acknowledged(n),
+            // The agent serves this machine's file to a member.
+            FromAgent::FileStarted { index, len } => {
+                let mut sink = None;
+                while let Some((peer, id, asked)) = self.files.asked.pop_front() {
+                    if asked == index {
+                        info!(
+                            self.log,
+                            "clipboard: sending a file of {len} bytes to {}",
+                            self.name(peer)
+                        );
+                        sink = Some(self.node.send_file(peer, id, index, len));
+                        break;
+                    }
+                }
+                self.files.out = Some(Out {
+                    index,
+                    sink,
+                    waiting: Default::default(),
+                    ended: len == 0,
+                });
+            }
+            FromAgent::FileBytes(bytes) => {
+                let n = u32::try_from(bytes.len()).unwrap_or(u32::MAX);
+                let Some(out) = &mut self.files.out else {
+                    let _ = agent.ack_file(n);
+                    return;
+                };
+                if !out.waiting.is_empty() {
+                    out.waiting.push_back(bytes);
+                    return;
+                }
+                match out.sink.as_ref().map(|s| s.try_send(bytes)) {
+                    Some(Ok(())) => {
+                        let _ = agent.ack_file(n);
+                    }
+                    Some(Err(tokio::sync::mpsc::error::TrySendError::Full(bytes))) => {
+                        out.waiting.push_back(bytes);
+                    }
+                    Some(Err(tokio::sync::mpsc::error::TrySendError::Closed(_))) => {
+                        // The member is gone: stop, and drop what comes.
+                        out.sink = None;
+                        let _ = agent.stop_file(out.index);
+                        let _ = agent.ack_file(n);
+                    }
+                    None => {
+                        let _ = agent.ack_file(n);
+                    }
+                }
+            }
+            FromAgent::FileEnded { .. } => {
+                if let Some(out) = &mut self.files.out {
+                    out.ended = true;
+                    if out.waiting.is_empty() {
+                        self.files.out = None;
+                    }
+                }
+            }
+            // Dropping the sink short resets the member's stream.
+            FromAgent::FileAbandoned { index }
+                if self.files.out.as_ref().is_some_and(|o| o.index == index) =>
+            {
+                let waiting: u64 = self
+                    .files
+                    .out
+                    .take()
+                    .map_or(0, |o| o.waiting.iter().map(|b| b.len() as u64).sum());
+                let _ = agent.ack_file(u32::try_from(waiting).unwrap_or(u32::MAX));
+            }
+            _ => {}
+        }
+    }
+
+    /// The relay can move a file's bytes on.
+    fn on_relayed(&mut self, relayed: Relayed) {
+        let Some(link) = &self.session else {
+            self.files = Relay::default();
+            return;
+        };
+        let agent = &link.handle;
+        match relayed {
+            Relayed::Room(permit) => {
+                let Some(out) = &mut self.files.out else {
+                    return;
+                };
+                if let Some(bytes) = out.waiting.pop_front() {
+                    let n = u32::try_from(bytes.len()).unwrap_or(u32::MAX);
+                    permit.send(bytes);
+                    let _ = agent.ack_file(n);
+                }
+                if out.ended && out.waiting.is_empty() {
+                    self.files.out = None;
+                }
+            }
+            Relayed::Gone => {
+                if let Some(out) = &mut self.files.out {
+                    let waiting: u64 = out.waiting.drain(..).map(|b| b.len() as u64).sum();
+                    out.sink = None;
+                    let _ = agent.stop_file(out.index);
+                    let _ = agent.ack_file(u32::try_from(waiting).unwrap_or(u32::MAX));
+                }
+            }
+            Relayed::Piece(piece) => {
+                let Some(incoming) = &self.files.incoming else {
+                    return;
+                };
+                let index = incoming.index;
+                match piece {
+                    Some(FileChunk::Len(len)) => {
+                        let _ = agent.start_file(index, len);
+                    }
+                    Some(FileChunk::Bytes(bytes)) => {
+                        self.files.to_agent.sent(bytes.len());
+                        let _ = agent.file_chunk(&bytes);
+                    }
+                    Some(FileChunk::End) => self.files.incoming = None,
+                    // The member went down, gave the file up, or never
+                    // answered: the paste fails.
+                    None => {
+                        self.files.incoming = None;
+                        let _ = agent.abandon_file(index);
+                    }
+                }
+            }
         }
     }
 
@@ -608,14 +807,42 @@ impl Host {
                         let set = match &contents {
                             Contents::Text(text) => link.handle.set_clipboard(text),
                             Contents::Image(png) => link.handle.set_clipboard_image(png),
+                            Contents::Files(manifest) => {
+                                match link.handle.set_clipboard_files(manifest) {
+                                    Ok(Some(set)) => {
+                                        self.clipboard.files_set(set);
+                                        Ok(())
+                                    }
+                                    Ok(None) => Ok(()),
+                                    Err(e) => Err(e),
+                                }
+                            }
                         };
-                        if set == Err(SetClipboardError::NoImages) {
-                            info!(
+                        match set {
+                            Err(SetClipboardError::NoImages) => info!(
                                 self.log,
                                 "clipboard: the session agent is from an older release and cannot set images"
-                            );
+                            ),
+                            Err(SetClipboardError::NoFiles) => info!(
+                                self.log,
+                                "clipboard: the session agent is from an older release and cannot set files"
+                            ),
+                            _ => {}
                         }
                     }
+                }
+            }
+            NodeEvent::FileRequest { peer, id, index } => {
+                let Some(copy) = self.clipboard.serve_file(id) else {
+                    return;
+                };
+                if self.files.asked.len() >= files::MAX_ASKED {
+                    return;
+                }
+                if let Some(link) = &self.session
+                    && link.handle.send_file(copy, index).is_ok()
+                {
+                    self.files.asked.push_back((peer, id, index));
                 }
             }
             _ => {}
@@ -738,6 +965,7 @@ impl Host {
                 | NodeEvent::ClipboardRequest { .. }
                 | NodeEvent::ClipboardData { .. }
                 | NodeEvent::ClipboardProgress { .. }
+                | NodeEvent::FileRequest { .. }
         ) {
             self.dirty = true;
         }
@@ -811,7 +1039,8 @@ impl Host {
             event @ (NodeEvent::ClipboardOffer { .. }
             | NodeEvent::ClipboardRequest { .. }
             | NodeEvent::ClipboardData { .. }
-            | NodeEvent::ClipboardProgress { .. }) => self.on_clipboard(event),
+            | NodeEvent::ClipboardProgress { .. }
+            | NodeEvent::FileRequest { .. }) => self.on_clipboard(event),
         }
     }
 
@@ -865,15 +1094,21 @@ impl Host {
     }
 }
 
+mod files;
 mod routing;
 
 #[cfg(test)]
 mod tests;
 
-/// A copy's kind and size, for the log. Never its contents.
+/// A copy's kind and size, for the log. Never its contents, nor a file's
+/// name.
 fn describe(contents: &Contents) -> String {
     match contents {
         Contents::Text(t) => format!("text, {} bytes", t.len()),
         Contents::Image(png) => format!("image, {} bytes", png.len()),
+        Contents::Files(manifest) => match proto::files::Manifest::parse(manifest) {
+            Ok(m) => format!("files, {} files totalling {} bytes", m.files(), m.total()),
+            Err(_) => "files".to_owned(),
+        },
     }
 }

@@ -34,6 +34,9 @@ win32-shell = { path = "crates/win32-shell" }
 # a dependency to them needs a stated reason in the PR.
 windows = "0.61"
 windows-service = "0.8"
+# The `#[implement]` macro for COM objects names `windows_core` directly: the
+# clipboard's virtual-file data object and streams (add-clipboard-files D3).
+windows-core = "0.61"
 # QUIC and TLS on ring: aws-lc-rs would need CMake and NASM on Windows. ring
 # needs clang only for ARM64, which bootstrap installs.
 quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring", "log"] }

@@ -198,13 +198,13 @@ mod tests {
             ty: registry::HELLO,
             payload: &payload,
         });
-        assert_eq!(event, Ok(ControlEvent::Agreed(2)));
+        assert_eq!(event, Ok(ControlEvent::Agreed(3)));
         s
     }
 
     #[test]
     fn hello_agrees_version() {
-        assert_eq!(agreed().version(), Some(2));
+        assert_eq!(agreed().version(), Some(3));
     }
 
     #[test]

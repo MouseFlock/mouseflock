@@ -9,6 +9,7 @@ publish.workspace = true
 [dependencies]
 ipc.workspace = true
 model.workspace = true
+proto.workspace = true
 win32-clipboard.workspace = true
 win32-input.workspace = true
 tokio = { workspace = true, features = ["rt", "net", "time", "sync", "macros"] }

@@ -5,15 +5,21 @@
 //!
 //! A copy is read in this order: privacy markers first, so a private copy's
 //! contents are never read; then text; then an image, from the `PNG` format
-//! as it is, or else from `CF_DIBV5` or `CF_DIB` encoded to PNG. A received
+//! as it is, or else from `CF_DIBV5` or `CF_DIB` encoded to PNG; then files,
+//! from `CF_HDROP`, walked into a [`FileCopy`] once the clipboard is closed
+//! again (add-clipboard-files D1, D2). A received
 //! image is decoded on this thread, in order with the text it is given, and
 //! set as `PNG` plus `CF_DIBV5`.
 //!
 //! Its own writes are recognised by the clipboard's sequence number and
-//! never reported.
+//! never reported; files it offers carry a marker format of their own, since
+//! another thread places them ([`crate::files`]).
 
-use std::sync::Once;
+use std::ffi::OsString;
+use std::os::windows::ffi::OsStringExt;
+use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::{Arc, Once};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -27,8 +33,9 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Memory::{
     GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock,
 };
-use windows::Win32::System::Ole::{CF_DIB, CF_DIBV5, CF_UNICODETEXT};
+use windows::Win32::System::Ole::{CF_DIB, CF_DIBV5, CF_HDROP, CF_UNICODETEXT};
 use windows::Win32::System::Threading::GetCurrentThreadId;
+use windows::Win32::UI::Shell::{DragQueryFileW, HDROP};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW, KillTimer, MSG,
     PostThreadMessageW, RegisterClassW, SetTimer, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP,
@@ -36,6 +43,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::{PCWSTR, w};
 
+use crate::files::{Entry, FileCopy, LIMITS, Offerer, Source, WalkError, own_format, walk};
 use crate::image::{ImageError, check_png, dib_to_png, png_end, png_to_dibv5};
 use crate::text::{MAX_TEXT_LEN, Markers, to_utf8, to_utf16z};
 
@@ -58,11 +66,15 @@ pub enum Copied {
     /// An image with no text alongside it, as one PNG within the image
     /// limits: the copying app's own PNG, or its bitmap encoded.
     Image(Vec<u8>),
+    /// Files with no text or image alongside them, within the file copy
+    /// limits.
+    Files(FileCopy),
     /// Marked to stay out of clipboard monitoring, history or cloud sync.
     Private,
-    /// Neither text nor an image this thread can share.
+    /// Neither text, an image nor files this thread can share.
     NoText,
-    /// Text over the 4 MiB limit, or an image over the image limits.
+    /// Text over the 4 MiB limit, an image over the image limits, or files
+    /// over the file copy limits.
     TooLarge,
     /// A received image could not be decoded, so the clipboard was left as
     /// it was. Not a copy: nothing is shared for it.
@@ -82,6 +94,8 @@ pub struct Clipboard {
     thread_id: u32,
     sets: Sender<Set>,
     handle: Option<JoinHandle<()>>,
+    /// The thread that offers received files; `None` if OLE would not start.
+    files: Option<Offerer>,
 }
 
 impl Clipboard {
@@ -97,6 +111,20 @@ impl Clipboard {
     /// clipboard is left as it was and [`Copied::NotSet`] is reported.
     pub fn set_image(&self, png: Vec<u8>) {
         self.queue(Set::Image(png));
+    }
+
+    /// Offers `entries` for paste, without their bytes: a file manager that
+    /// pastes reads each file from `source` (add-clipboard-files D3). The
+    /// change is not reported as a copy. `false` if files cannot be offered
+    /// on this desktop.
+    pub fn set_files(&self, entries: Vec<Entry>, source: Arc<dyn Source>) -> bool {
+        match &self.files {
+            Some(files) => {
+                files.offer(entries, source);
+                true
+            }
+            None => false,
+        }
     }
 
     fn queue(&self, set: Set) {
@@ -133,6 +161,7 @@ pub fn start() -> windows::core::Result<(Clipboard, Receiver<Copied>)> {
                 thread_id,
                 sets,
                 handle: Some(handle),
+                files: Offerer::start().ok(),
             },
             rx,
         )),
@@ -370,9 +399,13 @@ fn dword(open: &Open, format: u32) -> Option<u32> {
 }
 
 /// Reads the clipboard, privacy first: a private copy's text is never read.
-/// `None` if the clipboard stayed held by another app.
+/// `None` if the clipboard stayed held by another app, or holds files this
+/// agent offered.
 pub(crate) fn read(owner: Option<HWND>) -> Option<Copied> {
     let open = open(owner)?;
+    if available(&open, own_format()) {
+        return None;
+    }
     let (exclude, history, cloud) = marker_formats();
     let markers = Markers {
         exclude: available(&open, exclude),
@@ -384,7 +417,17 @@ pub(crate) fn read(owner: Option<HWND>) -> Option<Copied> {
     }
     let text = u32::from(CF_UNICODETEXT.0);
     if !available(&open, text) {
-        return Some(read_image(&open).unwrap_or(Copied::NoText));
+        if let Some(image) = read_image(&open) {
+            return Some(image);
+        }
+        let paths = read_paths(&open);
+        // Walking a tree reads the disk: let other apps have the clipboard.
+        drop(open);
+        return Some(match paths.map(|p| walk(&p, LIMITS)) {
+            Some(Ok(copy)) => Copied::Files(copy),
+            Some(Err(WalkError::TooLarge)) => Copied::TooLarge,
+            Some(Err(WalkError::Empty | WalkError::Unreadable)) | None => Copied::NoText,
+        });
     }
     let read = with_data(&open, text, |bytes| {
         // Each UTF-16 unit is at least one byte of UTF-8: reject the
@@ -451,6 +494,29 @@ fn read_image(open: &Open) -> Option<Copied> {
         }
     }
     None
+}
+
+/// The paths of the files on the open clipboard, if it holds `CF_HDROP`.
+fn read_paths(open: &Open) -> Option<Vec<PathBuf>> {
+    let format = u32::from(CF_HDROP.0);
+    if !available(open, format) {
+        return None;
+    }
+    // SAFETY: the clipboard is open on this thread, so the handle stays valid
+    // while it is read; DragQueryFileW only reads it, into buffers of the
+    // length it reported, and never takes ownership.
+    unsafe {
+        let hdrop = HDROP(GetClipboardData(format).ok()?.0);
+        let count = DragQueryFileW(hdrop, u32::MAX, None);
+        let mut paths = Vec::new();
+        for i in 0..count {
+            let len = DragQueryFileW(hdrop, i, None) as usize;
+            let mut buf = vec![0u16; len + 1];
+            let got = DragQueryFileW(hdrop, i, Some(&mut buf)) as usize;
+            paths.push(PathBuf::from(OsString::from_wide(buf.get(..got)?)));
+        }
+        Some(paths)
+    }
 }
 
 /// Puts `data` for `format` on the open, emptied clipboard.
@@ -717,6 +783,71 @@ mod desktop {
         clipboard.set_image(bad);
         assert!(matches!(rx.recv_timeout(WAIT).unwrap(), Copied::NotSet(_)));
         assert_eq!(read(None), Some(Copied::Text("deskhop before".into())));
+    }
+
+    /// `CF_HDROP` bytes for `paths`, as Explorer puts them on the clipboard:
+    /// a `DROPFILES` header, then each path NUL-terminated, then a NUL.
+    fn hdrop(paths: &[PathBuf]) -> Vec<u8> {
+        use std::os::windows::ffi::OsStrExt;
+        let mut out = Vec::new();
+        out.extend_from_slice(&20u32.to_le_bytes()); // pFiles
+        out.extend_from_slice(&[0; 8]); // pt
+        out.extend_from_slice(&0u32.to_le_bytes()); // fNC
+        out.extend_from_slice(&1u32.to_le_bytes()); // fWide
+        for p in paths {
+            for u in p.as_os_str().encode_wide().chain([0]) {
+                out.extend_from_slice(&u.to_le_bytes());
+            }
+        }
+        out.extend_from_slice(&[0, 0]);
+        out
+    }
+
+    #[test]
+    #[ignore = "uses the desktop clipboard"]
+    fn copied_files_are_reported_as_a_file_copy() {
+        let (_clipboard, rx) = start().unwrap();
+        let dir = std::env::temp_dir().join("deskhop-hdrop");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("folder").join("empty")).unwrap();
+        std::fs::write(dir.join("folder").join("a.txt"), b"abc").unwrap();
+        std::fs::write(dir.join("b.txt"), b"hello").unwrap();
+        let paths = [dir.join("folder"), dir.join("b.txt")];
+        assert!(write(None, &[], &[(u32::from(CF_HDROP.0), hdrop(&paths))]));
+        let Copied::Files(copy) = rx.recv_timeout(WAIT).unwrap() else {
+            panic!("not reported as files");
+        };
+        let listed: Vec<_> = copy
+            .entries
+            .iter()
+            .map(|e| (e.path.as_str(), e.is_dir, e.size))
+            .collect();
+        assert_eq!(
+            listed,
+            [
+                ("folder", true, 0),
+                ("folder/a.txt", false, 3),
+                ("folder/empty", true, 0),
+                ("b.txt", false, 5),
+            ]
+        );
+        assert_eq!(copy.sources[3], dir.join("b.txt"));
+    }
+
+    #[test]
+    #[ignore = "uses the desktop clipboard"]
+    fn text_wins_over_files() {
+        let (_clipboard, rx) = start().unwrap();
+        let file = std::env::temp_dir().join("deskhop-hdrop-text.txt");
+        std::fs::write(&file, b"x").unwrap();
+        copy(
+            "deskhop with files",
+            &[(u32::from(CF_HDROP.0), hdrop(&[file]))],
+        );
+        assert_eq!(
+            rx.recv_timeout(WAIT).unwrap(),
+            Copied::Text("deskhop with files".into())
+        );
     }
 
     #[test]

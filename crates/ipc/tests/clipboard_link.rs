@@ -239,7 +239,7 @@ async fn image_runs_reach_both_ends() {
         AgentEnd::connect(b, AgentRole::Session, || Millis(0)),
     );
     let ((handle, mut events), (reports, mut commands)) = (service.unwrap(), agent.unwrap());
-    assert_eq!((handle.version(), reports.version()), (2, 2));
+    assert_eq!((handle.version(), reports.version()), (3, 3));
 
     let png = png_like(300_000);
     reports.send_clipboard_image(&png).unwrap();

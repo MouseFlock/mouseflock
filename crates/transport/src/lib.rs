@@ -18,8 +18,8 @@ pub mod tls;
 
 pub use endpoint::{IDLE_TIMEOUT, KEEPALIVE, PORT, StartError};
 pub use node::{
-    Backoff, Config, Connection, Contents, DIAL_TIMEOUT, Down, Event, MAX_STRANGERS, NoNetwork,
-    NodeHandle, STRANGER_TIMEOUT, records_done_frame, start,
+    Backoff, Config, Connection, Contents, DIAL_TIMEOUT, Down, Event, FileChunk, FileFetch,
+    FileSink, MAX_STRANGERS, NoNetwork, NodeHandle, STRANGER_TIMEOUT, records_done_frame, start,
 };
 /// The version range a node advertises ([`Config::hello`]).
 pub use proto::hello::Hello;

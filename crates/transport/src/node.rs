@@ -14,6 +14,7 @@ use pairing::{
 };
 use proto::CloseReason;
 use proto::clipboard::{ClipKind, ClipboardMessage};
+use proto::files::FileContentRequest;
 use proto::hello::Hello;
 use proto::pairing::{PairingMessage, RecordsDone};
 use rand_core::OsRng;
@@ -78,12 +79,17 @@ impl Config {
     }
 }
 
-/// A copy's contents on the wire: text, or an image as one PNG. The node
-/// never decodes an image.
+/// A copy's contents on the wire: text, an image as one PNG, or a file
+/// copy's manifest. The node never decodes an image; a received manifest has
+/// been checked whole by `proto::files::Manifest::parse`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Contents {
     Text(Arc<str>),
     Image(Arc<[u8]>),
+    /// A file copy's manifest, encoded by `proto::files::encode_manifest`.
+    /// The files' bytes travel separately, one file at a time, when asked
+    /// for with [`NodeHandle::request_file`].
+    Files(Arc<[u8]>),
 }
 
 impl Contents {
@@ -91,17 +97,46 @@ impl Contents {
         match self {
             Self::Text(_) => ClipKind::Text,
             Self::Image(_) => ClipKind::Image,
+            Self::Files(_) => ClipKind::Files,
         }
     }
 
-    /// The bytes that travel: UTF-8 text, or the PNG file.
+    /// The bytes that travel: UTF-8 text, the PNG file, or the manifest.
     pub fn bytes(&self) -> &[u8] {
         match self {
             Self::Text(t) => t.as_bytes(),
-            Self::Image(b) => b,
+            Self::Image(b) | Self::Files(b) => b,
         }
     }
 }
+
+/// One piece of a requested file's contents, as it arrives from its owner.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FileChunk {
+    /// The file's length, first.
+    Len(u64),
+    /// More of its bytes, in order.
+    Bytes(Vec<u8>),
+    /// All of it arrived.
+    End,
+}
+
+/// A requested file's contents, in order, with backpressure: the owner sends
+/// no faster than this is read. Only [`FileChunk::End`] means the file is
+/// whole. The fetch ends without it if the owner went down, abandoned the
+/// file part way, or its connection does not define files. An owner that
+/// never answers, or abandons the file before its first bytes arrive, leaves
+/// the fetch waiting: the caller times it out.
+pub type FileFetch = mpsc::Receiver<FileChunk>;
+
+/// Where this machine writes one file's contents for a member that asked for
+/// it: exactly the announced length, then drop it. Dropping it short, or
+/// writing more, abandons the file, and the member's fetch fails. A send
+/// fails once the member is gone.
+pub type FileSink = mpsc::Sender<Vec<u8>>;
+
+/// Pieces of one file held between the network and its reader or writer.
+const FILE_BUFFER: usize = 8;
 
 /// Why a peer is down.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -159,6 +194,14 @@ pub enum Event {
         peer: PeerId,
         id: u64,
     },
+    /// An up member asks for one file of this machine's file copy with this
+    /// ID, by its index in the manifest. Answer with
+    /// [`NodeHandle::send_file`], or not at all.
+    FileRequest {
+        peer: PeerId,
+        id: u64,
+        index: u32,
+    },
 }
 
 /// Pairing mode could not open: no IPv4 network.
@@ -186,6 +229,8 @@ enum Command {
     /// least this version.
     Clipboard(PeerId, ClipboardMessage, u16),
     SendClipboard(PeerId, u64, Contents),
+    RequestFile(PeerId, u64, u32, mpsc::Sender<FileChunk>),
+    SendFile(PeerId, u64, u32, u64, mpsc::Receiver<Vec<u8>>),
     Connections(oneshot::Sender<Vec<Connection>>),
     Shutdown,
 }
@@ -277,6 +322,25 @@ impl NodeHandle {
         let _ = self.tx.send(Command::SendClipboard(peer, id, contents));
     }
 
+    /// Asks peer, if it is up and its connection agreed a version that
+    /// defines files, for one file of its file copy with this ID, by its
+    /// index in the manifest. The contents arrive on the returned fetch as
+    /// the owner streams them.
+    pub fn request_file(&self, peer: PeerId, id: u64, index: u32) -> FileFetch {
+        let (tx, rx) = mpsc::channel(FILE_BUFFER);
+        let _ = self.tx.send(Command::RequestFile(peer, id, index, tx));
+        rx
+    }
+
+    /// Sends one file of this machine's file copy with this ID to peer, if it
+    /// is up and its connection defines files, on a file content stream of
+    /// its own: `len` bytes, written to the returned sink as they are read.
+    pub fn send_file(&self, peer: PeerId, id: u64, index: u32, len: u64) -> FileSink {
+        let (tx, rx) = mpsc::channel(FILE_BUFFER);
+        let _ = self.tx.send(Command::SendFile(peer, id, index, len, rx));
+        tx
+    }
+
     /// How many member connections are open, for diagnostics.
     pub async fn connections(&self) -> Vec<Connection> {
         let (reply, rx) = oneshot::channel();
@@ -333,6 +397,7 @@ pub fn start(config: Config) -> Result<(NodeHandle, mpsc::UnboundedReceiver<Even
         sightings: BTreeMap::new(),
         sighting_order: VecDeque::new(),
         last_reached: config.addresses,
+        fetches: HashMap::new(),
         strangers: 0,
         race: None,
         next_race: 0,
@@ -366,6 +431,16 @@ pub(crate) enum Internal {
     ClipboardData(ConnId, u64, Contents),
     /// Bytes of this copy are still arriving on a clipboard stream.
     ClipboardProgress(ConnId, u64),
+    /// A member connection asks for one file of this machine's file copy.
+    FileRequest(ConnId, FileContentRequest),
+    /// A file content stream started for this copy and index; the reply is
+    /// where its bytes go, or `None` if this machine did not ask for it.
+    FileStarted(
+        ConnId,
+        u64,
+        u32,
+        oneshot::Sender<Option<mpsc::Sender<FileChunk>>>,
+    ),
     Closed(ConnId, Cause),
 }
 
@@ -491,6 +566,9 @@ struct Node {
     sightings: BTreeMap<PeerId, Sighting>,
     sighting_order: VecDeque<PeerId>,
     last_reached: BTreeMap<PeerId, SocketAddr>,
+    /// Files this machine asked for and is waiting on, by connection, copy
+    /// and index.
+    fetches: HashMap<(ConnId, u64, u32), mpsc::Sender<FileChunk>>,
     strangers: usize,
     race: Option<Race>,
     next_race: u64,
@@ -625,6 +703,33 @@ impl Node {
                     conn.send(Out::Transfer(id, contents));
                 }
             }
+            Command::RequestFile(peer, id, index, sink) => {
+                let mut frame = Vec::new();
+                if let Some(&conn_id) = self.up.get(&peer)
+                    && let Some(conn) = self.conns.get(&conn_id)
+                    && conn.version >= ClipKind::Files.since()
+                    && (FileContentRequest { id, index })
+                        .encode(&mut frame)
+                        .is_ok()
+                {
+                    // Forget fetches their callers gave up on.
+                    self.fetches.retain(|_, s| !s.is_closed());
+                    self.fetches.insert((conn_id, id, index), sink);
+                    conn.send(Out::Frame(frame));
+                }
+            }
+            Command::SendFile(peer, id, index, len, body) => {
+                if let Some(conn) = self.up.get(&peer).and_then(|id| self.conns.get(id))
+                    && conn.version >= ClipKind::Files.since()
+                {
+                    conn.send(Out::File {
+                        clip: id,
+                        index,
+                        len,
+                        body,
+                    });
+                }
+            }
             Command::Connections(reply) => {
                 let open = self
                     .conns
@@ -706,6 +811,23 @@ impl Node {
                 if let Some(peer) = self.up_peer(id) {
                     self.emit(Event::ClipboardProgress { peer, id: clip });
                 }
+            }
+            Internal::FileRequest(id, request) => {
+                if let Some(peer) = self.up_peer(id) {
+                    self.emit(Event::FileRequest {
+                        peer,
+                        id: request.id,
+                        index: request.index,
+                    });
+                }
+            }
+            Internal::FileStarted(id, clip, index, reply) => {
+                let sink = if self.up_peer(id).is_some() {
+                    self.fetches.remove(&(id, clip, index))
+                } else {
+                    None
+                };
+                let _ = reply.send(sink);
             }
             Internal::Closed(id, cause) => self.closed(id, cause),
         }
@@ -1094,6 +1216,8 @@ impl Node {
         let Some(conn) = self.conns.remove(&id) else {
             return;
         };
+        // Its files will not arrive: their fetches end, unfinished.
+        self.fetches.retain(|(c, ..), _| *c != id);
         if conn.stranger {
             self.strangers = self.strangers.saturating_sub(1);
         }

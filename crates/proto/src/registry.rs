@@ -70,13 +70,26 @@ pub const CLIPBOARD_CHUNK: u16 = 0x0014;
 /// Version 2.
 pub const CLIPBOARD_IMAGE_DATA: u16 = 0x0015;
 
+/// Starts a clipboard stream carrying a file copy's manifest: the copy's ID
+/// and the manifest's length. Version 3.
+pub const CLIPBOARD_FILES_DATA: u16 = 0x0016;
+
+/// Asks the receiver for one file of its file copy: the copy's ID and the
+/// file's index in the manifest. Version 3.
+pub const FILE_CONTENT_REQUEST: u16 = 0x0017;
+
+/// Starts a file content stream: the copy's ID, the file's index in the
+/// manifest, and its length as a u64. Version 3.
+pub const FILE_CONTENT_DATA: u16 = 0x0018;
+
 /// Where a message type may be sent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Channel {
     /// The control stream.
     Stream,
     Datagram,
-    /// A unidirectional stream carrying one clipboard transfer.
+    /// A unidirectional stream carrying one clipboard transfer: a copy's
+    /// text or image, a file copy's manifest, or one file's contents.
     Transfer,
 }
 
@@ -117,6 +130,24 @@ pub const REGISTRY: &[TypeInfo] = &[
         name: "ClipboardImageData",
         channel: Channel::Transfer,
         since: 2,
+    },
+    TypeInfo {
+        ty: CLIPBOARD_FILES_DATA,
+        name: "ClipboardFilesData",
+        channel: Channel::Transfer,
+        since: 3,
+    },
+    TypeInfo {
+        ty: FILE_CONTENT_REQUEST,
+        name: "FileContentRequest",
+        channel: Channel::Stream,
+        since: 3,
+    },
+    TypeInfo {
+        ty: FILE_CONTENT_DATA,
+        name: "FileContentData",
+        channel: Channel::Transfer,
+        since: 3,
     },
 ];
 
@@ -223,7 +254,7 @@ mod tests {
             .map(|i| (i.ty, i.name, i.channel))
             .collect();
         assert_eq!(added, [(0x0015, "ClipboardImageData", Channel::Transfer)]);
-        assert!(REGISTRY.iter().all(|i| i.since <= 2));
+        assert!(REGISTRY.iter().all(|i| i.since <= 3));
         let info = check(CLIPBOARD_IMAGE_DATA, Channel::Transfer, 2).unwrap();
         assert_eq!(info.name, "ClipboardImageData");
         assert_eq!(
@@ -241,6 +272,47 @@ mod tests {
         // Every version 1 type is still defined, unchanged, in version 2.
         for info in REGISTRY.iter().filter(|i| i.since == 1) {
             assert_eq!(check(info.ty, info.channel, 2), Ok(info));
+        }
+    }
+
+    #[test]
+    fn version_3_adds_only_the_file_types() {
+        use Channel::{Stream, Transfer};
+        let added: Vec<_> = REGISTRY
+            .iter()
+            .filter(|i| i.since == 3)
+            .map(|i| (i.ty, i.name, i.channel))
+            .collect();
+        assert_eq!(
+            added,
+            [
+                (0x0016, "ClipboardFilesData", Transfer),
+                (0x0017, "FileContentRequest", Stream),
+                (0x0018, "FileContentData", Transfer),
+            ]
+        );
+        for info in REGISTRY.iter().filter(|i| i.since == 3) {
+            assert_eq!(check(info.ty, info.channel, 3), Ok(info));
+            assert_eq!(
+                check(info.ty, info.channel, 2),
+                Err(ProtocolError::UnknownType { ty: info.ty })
+            );
+        }
+        assert_eq!(
+            check(FILE_CONTENT_REQUEST, Transfer, 3),
+            Err(ProtocolError::WrongChannel {
+                ty: FILE_CONTENT_REQUEST
+            })
+        );
+        for ty in [CLIPBOARD_FILES_DATA, FILE_CONTENT_DATA] {
+            assert_eq!(
+                check(ty, Stream, 3),
+                Err(ProtocolError::WrongChannel { ty })
+            );
+        }
+        // Every earlier type is still defined, unchanged, in version 3.
+        for info in REGISTRY.iter().filter(|i| i.since < 3) {
+            assert_eq!(check(info.ty, info.channel, 3), Ok(info));
         }
     }
 

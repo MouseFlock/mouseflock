@@ -4,6 +4,7 @@
 
 use ipc::IPC_VERSION;
 use ipc::clipboard::{Kind, NotShared, PNG_SIGNATURE, RunAssembler};
+use ipc::files::{FileRun, Window};
 use ipc::frame::{self, Decoded, HEADER_LEN};
 use ipc::message::{
     ClipboardToAgent, Hello, Role, ToAgent, ToAgentAny, ToService, check_agent_role,
@@ -38,21 +39,64 @@ impl Rng {
 
 /// Feeds a decoded clipboard message to the run at the end that receives it;
 /// errors are fine, panics are not.
-fn run_service(runs: &mut RunAssembler, m: &ToService) {
+/// One end's clipboard run, file run and window.
+#[derive(Default)]
+struct Runs {
+    clipboard: RunAssembler,
+    file: FileRun,
+    window: Window,
+}
+
+fn run_service(runs: &mut Runs, m: &ToService) {
     let _ = match m {
-        ToService::ClipboardText(len) => runs.start(0x16, Kind::Text, *len).map(|_| ()),
-        ToService::ClipboardImage(len) => runs.start(0x1a, Kind::Image, *len).map(|_| ()),
-        ToService::ClipboardChunk(bytes) => runs.chunk(0x17, bytes).map(|_| ()),
-        ToService::ClipboardNotShared(_) => runs.not_in_run(0x18),
+        ToService::ClipboardText(len) => runs.clipboard.start(0x16, Kind::Text, *len).map(|_| ()),
+        ToService::ClipboardImage(len) => runs.clipboard.start(0x1a, Kind::Image, *len).map(|_| ()),
+        ToService::ClipboardFiles(len) => runs.clipboard.start(0x40, Kind::Files, *len).map(|_| ()),
+        ToService::ClipboardChunk(bytes) => runs.clipboard.chunk(0x17, bytes).map(|_| ()),
+        ToService::ClipboardNotShared(_) => runs.clipboard.not_in_run(0x18),
+        ToService::FileContent { index, len } => runs.file.start(0x42, *index, *len).map(|_| ()),
+        ToService::FileChunk(bytes) => runs
+            .window
+            .receive(0x43, bytes.len())
+            .and_then(|()| runs.file.chunk(0x43, bytes.len()).map(|_| ())),
+        ToService::FileAbandoned { index } => {
+            runs.file.abandon(*index);
+            Ok(())
+        }
+        ToService::FileConsumed(n) => {
+            runs.window.acknowledge(*n);
+            Ok(())
+        }
         _ => Ok(()),
     };
 }
 
-fn run_agent(runs: &mut RunAssembler, m: &ClipboardToAgent) {
+fn run_agent(runs: &mut Runs, m: &ClipboardToAgent) {
     let _ = match m {
-        ClipboardToAgent::Set(len) => runs.start(0x27, Kind::Text, *len),
-        ClipboardToAgent::SetImage(len) => runs.start(0x29, Kind::Image, *len),
-        ClipboardToAgent::Chunk(bytes) => runs.chunk(0x28, bytes),
+        ClipboardToAgent::Set(len) => runs.clipboard.start(0x27, Kind::Text, *len).map(|_| ()),
+        ClipboardToAgent::SetImage(len) => {
+            runs.clipboard.start(0x29, Kind::Image, *len).map(|_| ())
+        }
+        ClipboardToAgent::SetFiles(len) => {
+            runs.clipboard.start(0x48, Kind::Files, *len).map(|_| ())
+        }
+        ClipboardToAgent::Chunk(bytes) => runs.clipboard.chunk(0x28, bytes).map(|_| ()),
+        ClipboardToAgent::SetFileContent { index, len } => {
+            runs.file.start(0x4a, *index, *len).map(|_| ())
+        }
+        ClipboardToAgent::SetFileChunk(bytes) => runs
+            .window
+            .receive(0x4b, bytes.len())
+            .and_then(|()| runs.file.chunk(0x4b, bytes.len()).map(|_| ())),
+        ClipboardToAgent::AbandonFile { index } => {
+            runs.file.abandon(*index);
+            Ok(())
+        }
+        ClipboardToAgent::FileAcked(n) => {
+            runs.window.acknowledge(*n);
+            Ok(())
+        }
+        ClipboardToAgent::SendFile { .. } | ClipboardToAgent::StopFile { .. } => Ok(()),
     };
 }
 
@@ -62,7 +106,7 @@ fn run_agent(runs: &mut RunAssembler, m: &ClipboardToAgent) {
 fn drive(input: &[u8]) {
     const V: u16 = IPC_VERSION;
     let mut rest = input;
-    let (mut service_runs, mut agent_runs) = (RunAssembler::default(), RunAssembler::default());
+    let (mut service_runs, mut agent_runs) = (Runs::default(), Runs::default());
     loop {
         match frame::decode(rest) {
             Ok(Decoded::NeedMore) | Err(_) => return,
@@ -75,6 +119,14 @@ fn drive(input: &[u8]) {
                     assert!(
                         frame.ty != 0x1a && frame.ty != 0x29,
                         "image type decoded at version 1"
+                    );
+                }
+                if ToService::decode(frame.ty, frame.payload, 2).is_ok()
+                    || ToAgentAny::decode(frame.ty, frame.payload, 2).is_ok()
+                {
+                    assert!(
+                        !(0x40..=0x4f).contains(&frame.ty),
+                        "file type decoded at version 2"
                     );
                 }
                 if let Ok(m) = ToService::decode(frame.ty, frame.payload, V) {
@@ -139,7 +191,81 @@ fn valid_frames(rng: &mut Rng) -> Vec<u8> {
         .encode_frame(&mut out)
         .unwrap();
     for _ in 0..rng.below(4) {
-        match rng.below(14) {
+        match rng.below(16) {
+            14 => {
+                let n = rng.below(30);
+                let manifest = rng.bytes(n);
+                ToService::ClipboardFiles(manifest.len() as u32)
+                    .encode_frame(&mut out)
+                    .unwrap();
+                for c in manifest.chunks(1 + rng.below(6)) {
+                    ToService::ClipboardChunk(c.to_vec())
+                        .encode_frame(&mut out)
+                        .unwrap();
+                }
+                let n = rng.below(30);
+                let body = rng.bytes(n);
+                let index = rng.next() as u32;
+                ToService::FileContent {
+                    index,
+                    len: body.len() as u64,
+                }
+                .encode_frame(&mut out)
+                .unwrap();
+                for c in body.chunks(1 + rng.below(6)) {
+                    ToService::FileChunk(c.to_vec())
+                        .encode_frame(&mut out)
+                        .unwrap();
+                }
+                for m in [
+                    ToService::FileWanted {
+                        set: rng.next() as u32,
+                        index,
+                    },
+                    ToService::FileAbandoned { index },
+                    ToService::FileUnwanted { index },
+                    ToService::FileConsumed(rng.next() as u32),
+                ] {
+                    m.encode_frame(&mut out).unwrap();
+                }
+            }
+            15 => {
+                let n = rng.below(30);
+                let manifest = rng.bytes(n);
+                ClipboardToAgent::SetFiles(manifest.len() as u32)
+                    .encode_frame(&mut out)
+                    .unwrap();
+                for c in manifest.chunks(1 + rng.below(6)) {
+                    ClipboardToAgent::Chunk(c.to_vec())
+                        .encode_frame(&mut out)
+                        .unwrap();
+                }
+                let n = rng.below(30);
+                let body = rng.bytes(n);
+                let index = rng.next() as u32;
+                ClipboardToAgent::SetFileContent {
+                    index,
+                    len: body.len() as u64,
+                }
+                .encode_frame(&mut out)
+                .unwrap();
+                for c in body.chunks(1 + rng.below(6)) {
+                    ClipboardToAgent::SetFileChunk(c.to_vec())
+                        .encode_frame(&mut out)
+                        .unwrap();
+                }
+                for m in [
+                    ClipboardToAgent::SendFile {
+                        copy: rng.next() as u32,
+                        index,
+                    },
+                    ClipboardToAgent::AbandonFile { index },
+                    ClipboardToAgent::StopFile { index },
+                    ClipboardToAgent::FileAcked(rng.next() as u32),
+                ] {
+                    m.encode_frame(&mut out).unwrap();
+                }
+            }
             12 => {
                 let mut png = PNG_SIGNATURE.to_vec();
                 let extra = rng.below(20);

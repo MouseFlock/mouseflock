@@ -40,6 +40,9 @@ pub enum ProtocolError {
     /// An agent message its role may not send: clipboard from the winlogon
     /// agent, or `InputDesktop` from the session agent.
     WrongRole { ty: u16, role: u8 },
+    /// File bytes beyond the window: more unacknowledged than
+    /// [`crate::files::FILE_WINDOW`].
+    FileWindow { ty: u16 },
 }
 
 impl fmt::Display for ProtocolError {
@@ -72,6 +75,12 @@ impl fmt::Display for ProtocolError {
             Self::InvalidScreen => write!(f, "screen report breaks a limit"),
             Self::InvalidField { ty } => {
                 write!(f, "message type {ty:#06x} has a field outside its limits")
+            }
+            Self::FileWindow { ty } => {
+                write!(
+                    f,
+                    "message type {ty:#06x} sends file bytes beyond the window"
+                )
             }
             Self::ClipboardRun { ty } => {
                 write!(f, "message type {ty:#06x} breaks a clipboard run")

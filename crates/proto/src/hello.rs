@@ -94,7 +94,7 @@ mod tests {
 
     #[test]
     fn this_release_payload_matches_spec() {
-        assert_eq!(Hello::this_release().payload(), [0x01, 0x00, 0x02, 0x00]);
+        assert_eq!(Hello::this_release().payload(), [0x01, 0x00, 0x03, 0x00]);
     }
 
     #[test]
@@ -103,7 +103,7 @@ mod tests {
         Hello::this_release().encode_frame(&mut out).unwrap();
         assert_eq!(
             out,
-            [0x04, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x02, 0x00]
+            [0x04, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x03, 0x00]
         );
     }
 
@@ -111,6 +111,12 @@ mod tests {
     fn peer_running_0_1_0_agrees_version_1() {
         assert_eq!(negotiate(Hello::this_release(), range(1, 1)), Ok(1));
         assert_eq!(negotiate(range(1, 1), Hello::this_release()), Ok(1));
+    }
+
+    #[test]
+    fn peer_understanding_images_but_not_files_agrees_version_2() {
+        assert_eq!(negotiate(Hello::this_release(), range(1, 2)), Ok(2));
+        assert_eq!(negotiate(range(1, 2), Hello::this_release()), Ok(2));
     }
 
     #[test]
