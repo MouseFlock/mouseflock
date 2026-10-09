@@ -8,9 +8,9 @@
 
 **How to get out:** press **Scroll Lock twice** quickly on the keyboard you are using. Your keyboard and mouse come back to the PC you are sitting at, wherever the cursor was. If that keyboard has no Scroll Lock key, use the controlled PC's own mouse instead: move it twice, away from the admin window, or press a key on its own keyboard, and that PC takes control back.
 
-**How to avoid it:** don't leave an admin window in front on a PC you are about to control. UAC prompts, the lock screen and the logon screen are not affected; DeskHop handles those.
+**How to avoid it:** on versions before the fix below, don't leave an admin window in front on a PC you are about to control. UAC prompts, the lock screen and the logon screen are not affected; DeskHop handles those.
 
-**Status:** open. Confirmed on two PCs on 2026-10-08.
+**Status:** fixed. The session agent now runs with UI access (ADR 0008), so input reaches elevated windows. Confirmed on two PCs on 2026-10-09: an admin Notepad and Task Manager take input, and the shield keeps the user's other programs from tampering with the agent. The recovery above applies only to versions before this fix.
 
 ## A PC whose screen you can't see
 

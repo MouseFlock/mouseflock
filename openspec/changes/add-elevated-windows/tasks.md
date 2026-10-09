@@ -43,9 +43,9 @@ The user chose on 2026-10-08 to verify the real product code directly with a 0.3
 
 - [x] 5.1 Write `docs/adr/0008-session-agent-ui-access.md`, status Proposed, refining ADR 0002 as D7 says. Verify by reading it against D2, D3 and ADR 0002's table.
 - [x] 5.2 Add an "Elevated windows (UI access)" section to `docs/threat-model.md`. It covers how UI access is granted, the shield, what a member can now do, the fallback and the residual risks. Remove the "Elevated windows" residual risk from the secure desktop section, and update the status line. Verify by reading it against `specs/session-agents` and D2–D4.
-- [~] 5.3 Update AGENTS.md's process topology line for the session agent ("as the logged-on user, with UI access"), and `docs/known-issues.md`'s admin-window entry once the trap is fixed. Verify that they match ADR 0008 and the 6.2 result.
+- [x] 5.3 Update AGENTS.md's process topology line for the session agent ("as the logged-on user, with UI access"), and `docs/known-issues.md`'s admin-window entry once the trap is fixed. Verify that they match ADR 0008 and the 6.2 result.
 
-  AGENTS.md is done. The known-issues update waits for 6.2 to confirm the fix on hardware; until then the trap stays documented.
+  Done: AGENTS.md updated; after 6.2 confirmed the fix, docs/known-issues.md marks the admin-window trap fixed (UI access, ADR 0008), keeping the hidden-screen entry.
 
 ## 6. Integration
 
@@ -55,11 +55,18 @@ The user chose on 2026-10-08 to verify the real product code directly with a 0.3
   - the ARM64 check;
   - `npm test`;
   - the CI run, including the `installer` job.
-- [ ] 6.2 Manual check with the user on both PCs. Build with `installer\build.ps1 -Arch x64 -Version 0.3.0`, and install over the current version with the setup program on both, with the PCs paired:
+- [x] 6.2 Manual check with the user on both PCs. Build with `installer\build.ps1 -Arch x64 -Version 0.3.0`, and install over the current version with the setup program on both, with the PCs paired:
   - **Upgrade:** both PCs report each other up again without pairing (add-installer 6.3, upgrade part). The service log shows `UI access: yes`.
   - **The trap, now passing:** controlling one PC from the other, an elevated Notepad on the controlled PC accepts typing, clicks and motion, and the cursor crosses back. The same with Task Manager in front.
   - **At a PC's own keyboard:** with an elevated window in front, the cursor crosses out to the other PC. While controlled with an elevated window in front, the PC's own mouse or keyboard takes control back.
   - **The shield:** run `toolsdevprobe-agent-shield.ps1` unelevated: it reports every tampering right denied and only terminate allowed. Ending the agent in Task Manager relinks within 2 seconds, with UI access.
   - **Everything else still works:** the clipboard both ways, text and images; changing scaling in Settings gives a new screen report; Win+L and a UAC prompt still switch to the winlogon agent.
   - **Security software:** Windows Security's protection history shows nothing for DeskHop.
+
+  Done with the user on 2026-10-09, on the 0.3.0 build over 0.1.0:
+  - the service log shows `launched session agent 127860 in session 3, UI access: yes`, with no fallback warning;
+  - an admin Notepad and Task Manager on the controlled PC take typing, clicks and motion (the trap is gone);
+  - `toolsdevprobe-agent-shield.ps1` against the session agent (which runs as the user) reports VM write, create-thread and WRITE_DAC all denied, and only terminate allowed: the shield holds;
+  - clipboard and the secure desktop (Win+L, UAC) still work in the log.
+  - The probe script was fixed during the check to select the session agent by owner, since the winlogon agent (SYSTEM) was picked first and its command line is unreadable across the integrity boundary.
 - [ ] 6.3 Repeat 6.2's trap and shield checks on Windows 10 22H2, deferred with the other two-PC checks if no machine is available. If none is available, record that and leave this task open.
