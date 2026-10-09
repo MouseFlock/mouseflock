@@ -123,11 +123,15 @@ After exchanging `Hello`, both peers SHALL use the highest protocol version that
 - **THEN** this peer closes the connection with the version-mismatch reason and reports that it runs the older version itself
 
 ### Requirement: Protocol version range of this release
-This release SHALL speak protocol version 1 only, advertising a lowest and highest version of 1 in its `Hello`.
+This release SHALL speak protocol versions 1 and 2, advertising a lowest version of 1 and a highest version of 2 in its `Hello`. Version 2 SHALL differ from version 1 only by adding the message type `0x0015` `ClipboardImageData`, allowed on clipboard streams. A connection that agreed version 1 SHALL behave exactly as a version 1 release does.
 
 #### Scenario: Hello sent by this release
 - **WHEN** this release sends `Hello`
-- **THEN** the payload is `01 00 01 00`
+- **THEN** the payload is `01 00 02 00`
+
+#### Scenario: Peer running 0.1.0
+- **WHEN** this release connects to a peer whose `Hello` advertises versions 1 to 1
+- **THEN** the connection agrees version 1, and pairing, input and text clipboard work as between two version 1 releases
 
 ### Requirement: Close reasons
 A peer closing a connection SHALL give one of these QUIC application error codes: `0` normal close, `1` protocol error, `2` version mismatch, `3` wrong pairing code, `4` not ready to pair, `5` not a member. A peer SHALL close with protocol error whenever this specification calls something a protocol error. New close reasons SHALL be added in `docs/protocol.md` with the version that introduced them.
