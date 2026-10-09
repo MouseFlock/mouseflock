@@ -23,7 +23,7 @@
     <Icon Id="DeskHop.ico" SourceFile="$(Icon)" />
     <Property Id="ARPPRODUCTICON" Value="DeskHop.ico" />
     <Property Id="ARPNOMODIFY" Value="1" />
-    <Property Id="ARPURLINFOABOUT" Value="https://github.com/sharatk/DeskHop" />
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/deskhop/DeskHop" />
 
     <!--
       D3, D11: Windows checks for files in use at InstallValidate, before any
