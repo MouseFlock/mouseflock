@@ -68,6 +68,9 @@ Stream and datagram messages share one 16-bit namespace. A type not defined in t
 | `0x0013` | `ClipboardData` | clipboard stream | 1 | See [Clipboard](#clipboard). |
 | `0x0014` | `ClipboardChunk` | clipboard stream | 1 | See [Clipboard](#clipboard). |
 | `0x0015` | `ClipboardImageData` | clipboard stream | 2 | See [Clipboard](#clipboard). |
+| `0x0016` | `ClipboardFilesData` | clipboard stream | 3 | See [File copies](#file-copies). |
+| `0x0017` | `FileContentRequest` | stream (control) | 3 | See [File copies](#file-copies). |
+| `0x0018` | `FileContentData` | clipboard stream | 3 | See [File copies](#file-copies). |
 
 ### Hello and version negotiation
 
@@ -84,7 +87,7 @@ Hello payload:
 - Protocol errors: a first control-stream frame that is not `Hello`, a second `Hello`, `Hello` on any other stream, `min` = 0, or `min` > `max`.
 - Before the version is agreed, datagrams are dropped, and frames on other streams are held unread until agreement (QUIC does not order data across streams).
 - `Hello` ignores bytes after `max`, so later versions can append fields. The first four bytes never change.
-- This release sends `min` 1 and `max` 2 (`01 00 02 00`). With a peer that speaks only version 1, such as DeskHop 0.1.0, the connection agrees version 1 and behaves exactly as between two version 1 releases.
+- This release sends `min` 1 and `max` 3 (`01 00 03 00`). With a peer that speaks only version 1, such as DeskHop 0.1.0, the connection agrees version 1 and behaves exactly as between two version 1 releases; with one that speaks up to version 2, it agrees version 2 and shares text and images but no files.
 
 ### Transport
 
@@ -107,7 +110,7 @@ Normative requirements: `openspec/specs/peer-transport/spec.md` and `openspec/sp
 
 Any other ALPN fails the handshake.
 
-**Control stream.** The dialer opens the connection's first bidirectional stream. Both sides write `Hello` on it at once ([Hello and version negotiation](#hello-and-version-negotiation)). Every stream message in this document travels on it, except `ClipboardData` and `ClipboardChunk`, which travel on clipboard streams ([Clipboard](#clipboard)); `Motion` travels in datagrams. A side finishes the stream only just before closing the connection. It is the only bidirectional stream: each side allows its peer one.
+**Control stream.** The dialer opens the connection's first bidirectional stream. Both sides write `Hello` on it at once ([Hello and version negotiation](#hello-and-version-negotiation)). Every stream message in this document travels on it, except the clipboard stream headers and `ClipboardChunk`, which travel on clipboard streams ([Clipboard](#clipboard), [File copies](#file-copies)); `Motion` travels in datagrams. A side finishes the stream only just before closing the connection. It is the only bidirectional stream: each side allows its peer one.
 
 **Member connections.**
 
@@ -284,7 +287,7 @@ Motion payload, and the mark (12 bytes):
 
 ### Clipboard
 
-Copied text and images follow the cursor: a copy is announced without its contents, and a machine fetches it when the cursor crosses into it. Normative requirements: `openspec/specs/clipboard/spec.md`.
+Copied text and images follow the cursor: a copy is announced without its contents, and a machine fetches it when the cursor crosses into it. Copied files follow the same way, with their bytes fetched only on paste ([File copies](#file-copies)). Normative requirements: `openspec/specs/clipboard/spec.md`.
 
 | Message | Where | Payload | Bytes |
 |---|---|---|---|
@@ -297,12 +300,28 @@ Copied text and images follow the cursor: a copy is announced without its conten
 - *Where:* only on a member connection whose peer is up, as for [engine messages](#engine-messages). On a pairing connection, before the peer is up, or on the wrong kind of stream, any of them is a protocol error.
 - `ClipboardOffer`: the sender has a new shareable copy with this ID, chosen at random. It never carries the copy, nor says whether it is text or an image. An image is offered only on a connection that agreed version 2 or later.
 - `ClipboardRequest`: the sender asks for the receiver's copy with this ID. The receiver answers with a clipboard stream if that is the copy it holds, and otherwise with nothing.
-- *Clipboard streams:* the sender of the copy opens a unidirectional stream for one transfer, at a priority below the control stream's. It writes one header frame, `ClipboardData` for text or `ClipboardImageData` for an image, then `ClipboardChunk` frames whose bytes total exactly `len`, then finishes the stream. Each side allows its peer one open clipboard stream at a time; QUIC flow control holds the next until the first ends.
+- *Clipboard streams:* the sender of the copy opens a unidirectional stream for one transfer, at a priority below the control stream's. It writes one header frame, `ClipboardData` for text, `ClipboardImageData` for an image or `ClipboardFilesData` for a file copy's manifest, then `ClipboardChunk` frames whose bytes total exactly `len`, then finishes the stream.
+- *Two lanes:* each side allows its peer two open unidirectional streams: one carrying a copy (text, an image or a manifest) and, from version 3, one carrying a file's contents. The receiver reads one stream of each kind at a time; a second of a kind waits, unread, until the first is done, and QUIC flow control holds its bytes. The receiver reads a stream's header frame exactly, and no further, before it waits. A sender opens one stream of each kind at a time. So a long file never holds up a text or image copy, and the memory a peer can make the receiver hold is unchanged.
 - *Limits:* for text, `len` is at most 4,194,304; for an image, at most 33,554,432. Either is checked before any chunk is read. A chunk outside that order, an empty chunk, bytes beyond `len`, a stream that ends short, text that is not UTF-8, or an image whose first eight bytes are not the PNG signature (`89 50 4E 47 0D 0A 1A 0A`), is a protocol error. `ClipboardImageData` on a connection that agreed version 1 is an unknown type, so a protocol error.
 - *Text:* UTF-8, exactly as copied; line endings are not changed.
 - *Image:* one PNG file. The receiving service never decodes it: it checks only the length and the signature, and hands the bytes to its session agent.
 - *Waiting:* a machine gives up on a requested copy when 10 seconds pass without any of its bytes arriving.
 - *Unrequested:* a well-formed clipboard stream for an ID the receiver did not request, or no longer wants, is read and discarded.
+
+### File copies
+
+From version 3, copied files follow the cursor as a copy whose contents are its **manifest**: each entry's path, whether it is a directory, and its size, but no file's bytes. A machine fetches the manifest when the cursor arrives, offers the files for paste, and fetches each file's bytes from the owner only when the user pastes. Normative requirements: `openspec/specs/file-transfer/spec.md`.
+
+| Message | Where | Payload | Bytes |
+|---|---|---|---|
+| `ClipboardFilesData` | clipboard stream, first frame of a manifest | id: u64, len: u32 | 12 |
+| `FileContentRequest` | control stream | id: u64, index: u32 | 12 |
+| `FileContentData` | clipboard stream, first frame of one file's contents | id: u64, index: u32, len: u64 | 20 |
+
+- *Offer:* a file copy is offered with `ClipboardOffer`, like any copy, only on a connection that agreed version 3 or later. A `ClipboardRequest` for it is answered with a manifest stream: `ClipboardFilesData` then `ClipboardChunk`s.
+- *Manifest:* `count: u32`, then `count` entries of `is_dir: u8` (0 or 1), `size: u64` (0 for a directory), `path_len: u16` and the path in UTF-8, relative to the copy root with `/` separators. Every directory is listed, so empty ones are recreated. Limits: 1 to 65,536 entries; files totalling at most 68,719,476,736 bytes (64 GiB); each path at most 259 UTF-16 code units; `len` at most 51,642,372 (4 + 65,536 × 788, the most those limits allow), checked at the header. A path must stay under the paste target: no empty name (so no leading, doubled or trailing `/`), no `.` or `..`, no `\`, `:`, `*`, `?`, `"`, `<`, `>`, `|` or control character, no name ending in a dot or space, and no device name (`CON`, `PRN`, `AUX`, `NUL`, `COM1`–`COM9`, `LPT1`–`LPT9`, with or without an extension). A manifest that breaks any rule, or has bytes after its last entry, is a protocol error; a sender checks the same rules and does not offer a copy that breaks them.
+- *Contents on paste:* `FileContentRequest` asks for one file of the copy with this ID, by its index in the manifest. The owner answers, if that is the copy it holds and the index names a file, with a file content stream: `FileContentData` then `ClipboardChunk`s totalling exactly `len`, which is a `u64` with no limit but the manifest's total. One stream carries one file. An owner that cannot finish a file resets the stream, so a receiver never takes a partial file for a whole one; a stream that ends short is a protocol error. An unrequested file content stream is stopped unread.
+- *Service:* neither service opens a file. The owner's session agent reads it and the receiver's session agent hands it to the file manager; the services relay the bytes.
 
 ### Close reasons
 
@@ -343,7 +362,7 @@ Hello payload (type 0x0001):
 
 - Each end sends `Hello` as its first frame at once, without waiting. Both then use the highest version in both ranges, and close the pipe if there is none.
 - *Roles:* `1` session agent, `2` winlogon agent, `3` UI, `4` service. The service end of an agent link accepts only the role of the agent it launched on that pipe (`1` or `2`), the service end of a UI link only `3`, and agents and UIs accept only `4`.
-- *Per role:* `ClipboardText`, `ClipboardChunk` and `ClipboardNotShared` may come only from a session agent, and `InputDesktop` only from a winlogon agent. Either from the other role is a protocol error. The service never sends `SetClipboard` to a winlogon agent.
+- *Per role:* `ClipboardText`, `ClipboardImage`, `ClipboardChunk`, `ClipboardNotShared` and the file messages (`0x0040`–`0x0046`) may come only from a session agent, and `InputDesktop` only from a winlogon agent. Either from the other role is a protocol error. The service never sends a clipboard or file message to a winlogon agent.
 - *Protocol errors:* a first frame that is not `Hello`, a second `Hello`, `min` = 0, `min` > `max`, or an undefined role.
 
 ### IPC message types
@@ -387,10 +406,26 @@ A type not defined in the agreed version, or travelling in a direction its type 
 | `0x003B` | `PairingClosed` | service → UI | 1 | reason: u8 | 1 |
 | `0x003C` | `PairingNotOpened` | service → UI | 1 | reason: u8 | 1 |
 | `0x003D` | `Learned` | service → UI | 1 | key, side: u8, undo_ms: u32 | 37 |
+| `0x0040` | `ClipboardFiles` | session agent → service | 3 | len: u32 (≤ 51,642,372) | 4 |
+| `0x0041` | `FileWanted` | session agent → service | 3 | set: u32, index: u32 | 8 |
+| `0x0042` | `FileContent` | session agent → service | 3 | index: u32, len: u64 | 12 |
+| `0x0043` | `FileChunk` | session agent → service | 3 | bytes of the file run | 1–65,536 |
+| `0x0044` | `FileAbandoned` | session agent → service | 3 | index: u32 | 4 |
+| `0x0045` | `FileConsumed` | session agent → service | 3 | n: u32 | 4 |
+| `0x0046` | `FileUnwanted` | session agent → service | 3 | index: u32 | 4 |
+| `0x0048` | `SetClipboardFiles` | service → session agent | 3 | len: u32 (≤ 51,642,372) | 4 |
+| `0x0049` | `SendFile` | service → session agent | 3 | copy: u32, index: u32 | 8 |
+| `0x004A` | `SetFileContent` | service → session agent | 3 | index: u32, len: u64 | 12 |
+| `0x004B` | `SetFileChunk` | service → session agent | 3 | bytes of the file run | 1–65,536 |
+| `0x004C` | `AbandonFile` | service → session agent | 3 | index: u32 | 4 |
+| `0x004D` | `FileAcked` | service → session agent | 3 | n: u32 | 4 |
+| `0x004E` | `StopFile` | service → session agent | 3 | index: u32 | 4 |
 
-**Codes:** origin `0` physical, `1` injected. Down `0` released, `1` pressed. Button `0` left, `1` right, `2` middle, `3` X1, `4` X2. Mode `0` pass all, `1` withhold all, `2` withhold mouse. Clipboard reason `0` private, `1` no text or image (at version 1: no text), `2` too large (text over 4 MiB, or an image over its limits). Active `0` another desktop has the input, `1` the agent's own desktop is the input desktop. Any other value is a protocol error.
+**Codes:** origin `0` physical, `1` injected. Down `0` released, `1` pressed. Button `0` left, `1` right, `2` middle, `3` X1, `4` X2. Mode `0` pass all, `1` withhold all, `2` withhold mouse. Clipboard reason `0` private, `1` no text, image or files (at version 1: no text; at version 2: no text or image), `2` too large (text over 4 MiB, an image over its limits, or files over the file copy limits). Active `0` another desktop has the input, `1` the agent's own desktop is the input desktop. Any other value is a protocol error.
 
 **Clipboard runs:** a copy travels as a run. A `ClipboardText` or `SetClipboard` gives the length in bytes of UTF-8; from version 2, a `ClipboardImage` or `SetClipboardImage` gives the length in bytes of one PNG file. The chunks of the same direction that follow carry exactly that many bytes; a text length of 0 is a complete run with no chunks. Other messages, input included, may come between chunks. A chunk outside a run, a chunk with no bytes, more bytes than announced, a new run or `ClipboardNotShared` before the run completes, text that is not UTF-8, an image under 8 bytes, or an image whose first eight bytes are not the PNG signature is a protocol error. Neither end decodes an image on the link; the agent decodes a `SetClipboardImage` run itself and leaves the clipboard unchanged if it cannot. The agent reports a copy once its clipboard has been still for 100 ms. It reports a copy marked to be kept out of clipboard monitoring, history or cloud sync as `ClipboardNotShared` with reason `0`, without reading its contents, and never reports its own `SetClipboard` or `SetClipboardImage` back. A copy holding text is reported as text even if it also holds an image. On a link that agreed version 1, the agent reports an image as reason `1`, and the service never sends `SetClipboardImage`. Normative requirements: `openspec/specs/agent-link/spec.md` and `openspec/specs/clipboard/spec.md`.
+
+**File copies:** from version 3, a `ClipboardFiles` or `SetClipboardFiles` run carries a file copy's manifest, in the layout of [File copies](#file-copies), checked on the link only for its length; the service and the agent check the manifest itself. Each end numbers the file copies reported on a link (`copy`) and those set on it (`set`), from 1, in order; `SendFile` and `FileWanted` name the number, and an agent answers nothing for a number other than its newest. A file's contents travel as a **file run**: `FileContent` or `SetFileContent` with the file's index and `u64` length, then `FileChunk` or `SetFileChunk` frames carrying exactly that many bytes. File runs are separate from clipboard runs, so a copy can be reported or set, and input pass, while one streams; one file run at a time in each direction. The side sending a file's bytes may end its run early with `FileAbandoned` (agent) or `AbandonFile` (service); the side receiving them asks it to stop with `FileUnwanted` (agent) or `StopFile` (service), and the sender answers with its abandon if the run had started. **Window:** the side sending a file's bytes keeps at most 1,048,576 of them that the other side has not acknowledged with `FileConsumed` or `FileAcked`; the receiving side acknowledges every byte it receives, passed on or discarded, and the counts run across runs. A file chunk outside a run, an empty one, more bytes than announced, a second run before the first ends, or bytes beyond the window is a protocol error. On a link that agreed a version before 3, the agent reports files as reason `1`, and the service sends no file message.
 
 **Fields:**
 - *usage:* a USB HID keyboard-page usage.
@@ -476,3 +511,5 @@ Any other value, a name or code outside its limits, or more than 256 members is 
 | IPC | 1 | Frames, `Hello` with roles and version negotiation, the message registry with directions, and the agent link (input and screen reports, `SetCapture`, injection, warp, `Ping`/`Pong` clock alignment), and clipboard runs (`0x0016`–`0x0018`, `0x0027`–`0x0028`), and the winlogon agent (`InputDesktop`, `0x0019`, and the messages allowed per agent role). The UI link (`0x0030`–`0x003D`: pairing, join, remove, undo, forget layout, `Status` and notices), with directions per link. Version 1 has not shipped, so these fill it in without a version bump. |
 | Peer | 2 | `ClipboardImageData` (`0x0015`): a clipboard stream carrying an image as one PNG, up to 33,554,432 bytes, offered only on connections at version 2. Version 1 shipped with DeskHop 0.1.0, so images get a new version; this release still speaks version 1 with older peers, text only. |
 | IPC | 2 | Image runs: `ClipboardImage` (`0x001A`) and `SetClipboardImage` (`0x0029`), sharing the chunk messages; reason `1` reads "no text or image" and `2` "too large". A link at version 1, as with an agent mid-upgrade, carries text only. |
+| Peer | 3 | File copies: `ClipboardFilesData` (`0x0016`, a manifest on a clipboard stream), `FileContentRequest` (`0x0017`, control stream) and `FileContentData` (`0x0018`, one file's contents on a clipboard stream, `u64` length). Two lanes: a peer may open a copy stream and a file content stream at once. Files are offered only on connections at version 3; this release speaks versions 1 and 2 with older peers, without files. |
+| IPC | 3 | File messages (`0x0040`–`0x004E`): manifest runs with copy and set numbers, `u64` file runs with their own chunks, abandoning a run, and the 1 MiB window with its acknowledgements. Reason `1` reads "no text, image or files". A link at version 2 carries text and images only. |

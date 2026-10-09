@@ -53,15 +53,19 @@ pub enum ProtocolError {
     EmptyChunk,
     /// Clipboard chunks beyond the length the header announced, text or image.
     TextOverrun,
-    /// A clipboard stream, text or image, that ended before its announced
+    /// A clipboard stream, of any kind, that ended before its announced
     /// length.
-    TextIncomplete { remaining: u32 },
+    TextIncomplete { remaining: u64 },
     /// Clipboard text that is not UTF-8.
     TextNotUtf8,
     /// An image clipboard transfer longer than the image limit.
     ImageTooLong { len: u32 },
     /// An image clipboard transfer that does not start with the PNG signature.
     NotPng,
+    /// A file copy's manifest longer than any the limits allow.
+    ManifestTooLong { len: u32 },
+    /// A file copy's manifest that is malformed, unsafe or over a ceiling.
+    Manifest(crate::files::ManifestError),
 }
 
 impl fmt::Display for ProtocolError {
@@ -114,6 +118,8 @@ impl fmt::Display for ProtocolError {
             Self::TextNotUtf8 => write!(f, "clipboard text is not UTF-8"),
             Self::ImageTooLong { len } => write!(f, "clipboard image of {len} bytes over limit"),
             Self::NotPng => write!(f, "clipboard image is not a PNG"),
+            Self::ManifestTooLong { len } => write!(f, "file manifest of {len} bytes over limit"),
+            Self::Manifest(e) => write!(f, "file manifest refused: {e:?}"),
         }
     }
 }

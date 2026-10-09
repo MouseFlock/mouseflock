@@ -1,5 +1,6 @@
 //! `Hello`, the message registry, and the agent link's messages (IPC
-//! versions 1 and 2; version 2 adds the image runs).
+//! versions 1 to 3; version 2 adds the image runs, version 3 the file
+//! messages, `0x0040`–`0x004D`).
 //!
 //! All integers are little-endian and every payload but `Screen` has a fixed
 //! length. Times are milliseconds on the sender's monotonic clock.
@@ -10,6 +11,7 @@ use model::{
 };
 
 use crate::clipboard::{MAX_IMAGE_LEN, MAX_TEXT_LEN, NotShared};
+use crate::files::MAX_MANIFEST_LEN;
 use crate::{EncodeError, IPC_VERSION, MIN_IPC_VERSION, ProtocolError, frame, ui};
 
 /// Never a valid message type.
@@ -48,6 +50,39 @@ pub const SET_CLIPBOARD_CHUNK: u16 = 0x0028;
 /// Starts a run of an image, as one PNG, for the agent to put on the
 /// clipboard. Version 2.
 pub const SET_CLIPBOARD_IMAGE: u16 = 0x0029;
+
+/// Starts a run of a copied file copy's manifest: its length. Version 3.
+pub const CLIPBOARD_FILES: u16 = 0x0040;
+/// The receiving agent wants one file of a file copy it was set. Version 3.
+pub const FILE_WANTED: u16 = 0x0041;
+/// The owning agent starts serving one file: its index and `u64` length.
+/// Version 3.
+pub const FILE_CONTENT: u16 = 0x0042;
+/// Bytes of the file being served, within a `FileContent` run. Version 3.
+pub const FILE_CHUNK: u16 = 0x0043;
+/// The owning agent stops serving its file: its run ends. Version 3.
+pub const FILE_ABANDONED: u16 = 0x0044;
+/// The receiving agent passed on this many more bytes of a file being set.
+/// Version 3.
+pub const FILE_CONSUMED: u16 = 0x0045;
+/// The receiving agent no longer wants the file being set. Version 3.
+pub const FILE_UNWANTED: u16 = 0x0046;
+/// Starts a run of a file copy's manifest for the agent to offer for paste.
+/// Version 3.
+pub const SET_CLIPBOARD_FILES: u16 = 0x0048;
+/// Asks the owning agent to serve one file of a copy it reported. Version 3.
+pub const SEND_FILE: u16 = 0x0049;
+/// A wanted file's bytes start: its index and `u64` length. Version 3.
+pub const SET_FILE_CONTENT: u16 = 0x004a;
+/// Bytes of the file being set, within a `SetFileContent` run. Version 3.
+pub const SET_FILE_CHUNK: u16 = 0x004b;
+/// The file being set will not complete: its run ends. Version 3.
+pub const ABANDON_FILE: u16 = 0x004c;
+/// The service passed on this many more bytes of the file being served.
+/// Version 3.
+pub const FILE_ACKED: u16 = 0x004d;
+/// The owning agent should stop serving its file. Version 3.
+pub const STOP_FILE: u16 = 0x004e;
 
 /// Most monitors a `Screen` may list.
 pub const MAX_MONITORS: usize = 32;
@@ -97,6 +132,16 @@ const fn info_v2(ty: u16, name: &'static str, direction: Direction) -> TypeInfo 
         name,
         direction,
         since: 2,
+    }
+}
+
+/// A message type introduced in IPC version 3.
+const fn info_v3(ty: u16, name: &'static str, direction: Direction) -> TypeInfo {
+    TypeInfo {
+        ty,
+        name,
+        direction,
+        since: 3,
     }
 }
 
@@ -152,6 +197,28 @@ pub const REGISTRY: &[TypeInfo] = &[
         Direction::ServiceToUi,
     ),
     info(ui::LEARNED, "Learned", Direction::ServiceToUi),
+    info_v3(CLIPBOARD_FILES, "ClipboardFiles", Direction::AgentToService),
+    info_v3(FILE_WANTED, "FileWanted", Direction::AgentToService),
+    info_v3(FILE_CONTENT, "FileContent", Direction::AgentToService),
+    info_v3(FILE_CHUNK, "FileChunk", Direction::AgentToService),
+    info_v3(FILE_ABANDONED, "FileAbandoned", Direction::AgentToService),
+    info_v3(FILE_CONSUMED, "FileConsumed", Direction::AgentToService),
+    info_v3(FILE_UNWANTED, "FileUnwanted", Direction::AgentToService),
+    info_v3(
+        SET_CLIPBOARD_FILES,
+        "SetClipboardFiles",
+        Direction::ServiceToAgent,
+    ),
+    info_v3(SEND_FILE, "SendFile", Direction::ServiceToAgent),
+    info_v3(
+        SET_FILE_CONTENT,
+        "SetFileContent",
+        Direction::ServiceToAgent,
+    ),
+    info_v3(SET_FILE_CHUNK, "SetFileChunk", Direction::ServiceToAgent),
+    info_v3(ABANDON_FILE, "AbandonFile", Direction::ServiceToAgent),
+    info_v3(FILE_ACKED, "FileAcked", Direction::ServiceToAgent),
+    info_v3(STOP_FILE, "StopFile", Direction::ServiceToAgent),
 ];
 
 /// Checks that `ty` is defined in `version` and may arrive at an end that
@@ -178,9 +245,9 @@ pub fn check(
 /// from the session agent, `InputDesktop` only from the winlogon agent.
 pub fn check_agent_role(ty: u16, role: Role) -> Result<(), ProtocolError> {
     let allowed = match ty {
-        CLIPBOARD_TEXT | CLIPBOARD_IMAGE | CLIPBOARD_CHUNK | CLIPBOARD_NOT_SHARED => {
-            role == Role::SessionAgent
-        }
+        CLIPBOARD_TEXT | CLIPBOARD_IMAGE | CLIPBOARD_CHUNK | CLIPBOARD_NOT_SHARED
+        | CLIPBOARD_FILES | FILE_WANTED | FILE_CONTENT | FILE_CHUNK | FILE_ABANDONED
+        | FILE_CONSUMED | FILE_UNWANTED => role == Role::SessionAgent,
         INPUT_DESKTOP => role == Role::WinlogonAgent,
         _ => true,
     };
@@ -480,6 +547,33 @@ pub enum ToService {
     /// Whether the agent's own desktop is the input desktop. Winlogon
     /// agent only.
     InputDesktop(bool),
+    /// A run of a copied file copy's manifest starts: its length. Version 3.
+    ClipboardFiles(u32),
+    /// The agent wants file `index` of the file copy it was set as number
+    /// `set`. Version 3.
+    FileWanted {
+        set: u32,
+        index: u32,
+    },
+    /// The agent starts serving file `index` of its copy: `len` bytes
+    /// follow in `FileChunk`s. Version 3.
+    FileContent {
+        index: u32,
+        len: u64,
+    },
+    /// Bytes of the file being served; 1 to 65,536 of them. Version 3.
+    FileChunk(Vec<u8>),
+    /// The agent stops serving file `index`, ending its run. Version 3.
+    FileAbandoned {
+        index: u32,
+    },
+    /// The agent passed on this many more bytes of the file being set.
+    /// Version 3.
+    FileConsumed(u32),
+    /// The agent no longer wants file `index`, being set. Version 3.
+    FileUnwanted {
+        index: u32,
+    },
 }
 
 impl ToService {
@@ -498,6 +592,13 @@ impl ToService {
             Self::ClipboardChunk(_) => CLIPBOARD_CHUNK,
             Self::ClipboardNotShared(_) => CLIPBOARD_NOT_SHARED,
             Self::InputDesktop(_) => INPUT_DESKTOP,
+            Self::ClipboardFiles(_) => CLIPBOARD_FILES,
+            Self::FileWanted { .. } => FILE_WANTED,
+            Self::FileContent { .. } => FILE_CONTENT,
+            Self::FileChunk(_) => FILE_CHUNK,
+            Self::FileAbandoned { .. } => FILE_ABANDONED,
+            Self::FileConsumed(_) => FILE_CONSUMED,
+            Self::FileUnwanted { .. } => FILE_UNWANTED,
         }
     }
 
@@ -557,6 +658,20 @@ impl ToService {
             Self::ClipboardChunk(bytes) => p.extend_from_slice(chunk(bytes)?),
             Self::ClipboardNotShared(why) => p.push(why.code()),
             Self::InputDesktop(active) => p.push(u8::from(*active)),
+            Self::ClipboardFiles(len) => p.extend_from_slice(&manifest_len(*len)?.to_le_bytes()),
+            Self::FileWanted { set, index } => {
+                p.extend_from_slice(&set.to_le_bytes());
+                p.extend_from_slice(&index.to_le_bytes());
+            }
+            Self::FileContent { index, len } => {
+                p.extend_from_slice(&index.to_le_bytes());
+                p.extend_from_slice(&len.to_le_bytes());
+            }
+            Self::FileChunk(bytes) => p.extend_from_slice(chunk(bytes)?),
+            Self::FileAbandoned { index } | Self::FileUnwanted { index } => {
+                p.extend_from_slice(&index.to_le_bytes())
+            }
+            Self::FileConsumed(n) => p.extend_from_slice(&n.to_le_bytes()),
         }
         Ok(p)
     }
@@ -639,6 +754,34 @@ impl ToService {
                     value => return Err(ProtocolError::InvalidCode { ty, value }),
                 })
             }
+            CLIPBOARD_FILES => Self::ClipboardFiles(decode_manifest_len(ty, payload, &mut f)?),
+            FILE_WANTED => {
+                exactly(ty, payload, 8)?;
+                Self::FileWanted {
+                    set: f.u32()?,
+                    index: f.u32()?,
+                }
+            }
+            FILE_CONTENT => {
+                exactly(ty, payload, 12)?;
+                Self::FileContent {
+                    index: f.u32()?,
+                    len: f.u64()?,
+                }
+            }
+            FILE_CHUNK => Self::FileChunk(decode_chunk(ty, payload, &mut f)?),
+            FILE_ABANDONED => {
+                exactly(ty, payload, 4)?;
+                Self::FileAbandoned { index: f.u32()? }
+            }
+            FILE_CONSUMED => {
+                exactly(ty, payload, 4)?;
+                Self::FileConsumed(f.u32()?)
+            }
+            FILE_UNWANTED => {
+                exactly(ty, payload, 4)?;
+                Self::FileUnwanted { index: f.u32()? }
+            }
             _ => return Err(ProtocolError::UnknownType { ty }),
         };
         f.end()?;
@@ -662,6 +805,24 @@ const fn image_len(len: u32) -> Result<u32, EncodeError> {
     } else {
         Ok(len)
     }
+}
+
+/// A manifest run's length, if it is within the bound.
+const fn manifest_len(len: u32) -> Result<u32, EncodeError> {
+    if len > MAX_MANIFEST_LEN {
+        Err(EncodeError::InvalidField)
+    } else {
+        Ok(len)
+    }
+}
+
+fn decode_manifest_len(ty: u16, payload: &[u8], f: &mut Fields<'_>) -> Result<u32, ProtocolError> {
+    exactly(ty, payload, 4)?;
+    let len = f.u32()?;
+    if len > MAX_MANIFEST_LEN {
+        return Err(ProtocolError::InvalidField { ty });
+    }
+    Ok(len)
 }
 
 /// A chunk's bytes, if there are 1 to [`frame::MAX_PAYLOAD`] of them.
@@ -845,6 +1006,25 @@ pub enum ClipboardToAgent {
     SetImage(u32),
     /// Bytes within the run; 1 to 65,536 of them.
     Chunk(Vec<u8>),
+    /// A run of a file copy's manifest to offer for paste starts: its
+    /// length. Version 3.
+    SetFiles(u32),
+    /// Serve file `index` of the file copy reported as number `copy`.
+    /// Version 3.
+    SendFile { copy: u32, index: u32 },
+    /// The wanted file `index` starts: `len` bytes follow in
+    /// `SetFileChunk`s. Version 3.
+    SetFileContent { index: u32, len: u64 },
+    /// Bytes of the file being set; 1 to 65,536 of them. Version 3.
+    SetFileChunk(Vec<u8>),
+    /// The file `index` being set will not complete, ending its run.
+    /// Version 3.
+    AbandonFile { index: u32 },
+    /// The service passed on this many more bytes of the file being served.
+    /// Version 3.
+    FileAcked(u32),
+    /// Stop serving file `index`. Version 3.
+    StopFile { index: u32 },
 }
 
 impl ClipboardToAgent {
@@ -853,6 +1033,13 @@ impl ClipboardToAgent {
             Self::Set(_) => SET_CLIPBOARD,
             Self::SetImage(_) => SET_CLIPBOARD_IMAGE,
             Self::Chunk(_) => SET_CLIPBOARD_CHUNK,
+            Self::SetFiles(_) => SET_CLIPBOARD_FILES,
+            Self::SendFile { .. } => SEND_FILE,
+            Self::SetFileContent { .. } => SET_FILE_CONTENT,
+            Self::SetFileChunk(_) => SET_FILE_CHUNK,
+            Self::AbandonFile { .. } => ABANDON_FILE,
+            Self::FileAcked(_) => FILE_ACKED,
+            Self::StopFile { .. } => STOP_FILE,
         }
     }
 
@@ -860,7 +1047,14 @@ impl ClipboardToAgent {
         Ok(match self {
             Self::Set(len) => text_len(*len)?.to_le_bytes().to_vec(),
             Self::SetImage(len) => image_len(*len)?.to_le_bytes().to_vec(),
-            Self::Chunk(bytes) => chunk(bytes)?.to_vec(),
+            Self::Chunk(bytes) | Self::SetFileChunk(bytes) => chunk(bytes)?.to_vec(),
+            Self::SetFiles(len) => manifest_len(*len)?.to_le_bytes().to_vec(),
+            Self::SendFile { copy, index } => [copy.to_le_bytes(), index.to_le_bytes()].concat(),
+            Self::SetFileContent { index, len } => {
+                [&index.to_le_bytes()[..], &len.to_le_bytes()[..]].concat()
+            }
+            Self::AbandonFile { index } | Self::StopFile { index } => index.to_le_bytes().to_vec(),
+            Self::FileAcked(n) => n.to_le_bytes().to_vec(),
         })
     }
 
@@ -876,6 +1070,34 @@ impl ClipboardToAgent {
             SET_CLIPBOARD => Self::Set(decode_text_len(ty, payload, &mut f)?),
             SET_CLIPBOARD_IMAGE => Self::SetImage(decode_image_len(ty, payload, &mut f)?),
             SET_CLIPBOARD_CHUNK => Self::Chunk(decode_chunk(ty, payload, &mut f)?),
+            SET_CLIPBOARD_FILES => Self::SetFiles(decode_manifest_len(ty, payload, &mut f)?),
+            SEND_FILE => {
+                exactly(ty, payload, 8)?;
+                Self::SendFile {
+                    copy: f.u32()?,
+                    index: f.u32()?,
+                }
+            }
+            SET_FILE_CONTENT => {
+                exactly(ty, payload, 12)?;
+                Self::SetFileContent {
+                    index: f.u32()?,
+                    len: f.u64()?,
+                }
+            }
+            SET_FILE_CHUNK => Self::SetFileChunk(decode_chunk(ty, payload, &mut f)?),
+            ABANDON_FILE => {
+                exactly(ty, payload, 4)?;
+                Self::AbandonFile { index: f.u32()? }
+            }
+            FILE_ACKED => {
+                exactly(ty, payload, 4)?;
+                Self::FileAcked(f.u32()?)
+            }
+            STOP_FILE => {
+                exactly(ty, payload, 4)?;
+                Self::StopFile { index: f.u32()? }
+            }
             _ => return Err(ProtocolError::UnknownType { ty }),
         };
         f.end()?;
@@ -893,9 +1115,9 @@ pub enum ToAgentAny {
 impl ToAgentAny {
     pub fn decode(ty: u16, payload: &[u8], version: u16) -> Result<Self, ProtocolError> {
         match ty {
-            SET_CLIPBOARD | SET_CLIPBOARD_IMAGE | SET_CLIPBOARD_CHUNK => {
-                ClipboardToAgent::decode(ty, payload, version).map(Self::Clipboard)
-            }
+            SET_CLIPBOARD | SET_CLIPBOARD_IMAGE | SET_CLIPBOARD_CHUNK | SET_CLIPBOARD_FILES
+            | SEND_FILE | SET_FILE_CONTENT | SET_FILE_CHUNK | ABANDON_FILE | FILE_ACKED
+            | STOP_FILE => ClipboardToAgent::decode(ty, payload, version).map(Self::Clipboard),
             _ => ToAgent::decode(ty, payload, version).map(Self::Command),
         }
     }
@@ -1186,7 +1408,7 @@ mod tests {
     #[test]
     fn hello() {
         let agent = Hello::this_release(Role::SessionAgent);
-        assert_eq!(agent.payload(), [0x01, 0x00, 0x02, 0x00, 0x01]);
+        assert_eq!(agent.payload(), [0x01, 0x00, 0x03, 0x00, 0x01]);
         let mut longer = agent.payload().to_vec();
         longer.extend([9; 6]);
         assert_eq!(Hello::decode(&longer), Ok(agent));
@@ -1208,7 +1430,7 @@ mod tests {
         assert!(Hello::decode(&[1, 0, 1, 0]).is_err());
 
         let service = Hello::this_release(Role::Service);
-        assert_eq!(service.agree(&agent), Some(2));
+        assert_eq!(service.agree(&agent), Some(3));
         // An agent from the previous release, as during an upgrade.
         let old_agent = Hello {
             min: 1,
@@ -1216,9 +1438,16 @@ mod tests {
             role: Role::SessionAgent,
         };
         assert_eq!(service.agree(&old_agent), Some(1));
+        // An agent that understands images but not files.
+        let images_agent = Hello {
+            min: 1,
+            max: 2,
+            role: Role::SessionAgent,
+        };
+        assert_eq!(service.agree(&images_agent), Some(2));
         let newer = Hello {
-            min: 3,
-            max: 4,
+            min: 4,
+            max: 5,
             role: Role::Service,
         };
         assert_eq!(newer.agree(&agent), None);
@@ -1344,7 +1573,118 @@ mod tests {
         assert!(
             REGISTRY
                 .iter()
-                .all(|i| i.ty != RESERVED && (1..=2).contains(&i.since))
+                .all(|i| i.ty != RESERVED && (1..=3).contains(&i.since))
+        );
+        let mut names: Vec<_> = REGISTRY.iter().map(|i| i.name).collect();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), REGISTRY.len(), "a name is used twice");
+    }
+
+    #[test]
+    fn version_3_adds_only_the_file_messages() {
+        use Direction::{AgentToService as A, ServiceToAgent as S};
+        let added: Vec<_> = REGISTRY
+            .iter()
+            .filter(|i| i.since == 3)
+            .map(|i| (i.ty, i.name, i.direction))
+            .collect();
+        assert_eq!(
+            added,
+            [
+                (0x0040, "ClipboardFiles", A),
+                (0x0041, "FileWanted", A),
+                (0x0042, "FileContent", A),
+                (0x0043, "FileChunk", A),
+                (0x0044, "FileAbandoned", A),
+                (0x0045, "FileConsumed", A),
+                (0x0046, "FileUnwanted", A),
+                (0x0048, "SetClipboardFiles", S),
+                (0x0049, "SendFile", S),
+                (0x004a, "SetFileContent", S),
+                (0x004b, "SetFileChunk", S),
+                (0x004c, "AbandonFile", S),
+                (0x004d, "FileAcked", S),
+                (0x004e, "StopFile", S),
+            ]
+        );
+        let to_service = [
+            ToService::ClipboardFiles(0),
+            ToService::ClipboardFiles(MAX_MANIFEST_LEN),
+            ToService::FileWanted {
+                set: 1,
+                index: u32::MAX,
+            },
+            ToService::FileContent {
+                index: 7,
+                len: 5 << 32,
+            },
+            ToService::FileChunk(vec![1; frame::MAX_PAYLOAD]),
+            ToService::FileAbandoned { index: 3 },
+            ToService::FileConsumed(65_536),
+            ToService::FileUnwanted { index: 2 },
+        ];
+        for m in to_service {
+            let p = m.payload().unwrap();
+            assert_eq!(ToService::decode(m.ty(), &p, 3), Ok(m.clone()));
+            assert_eq!(
+                ToService::decode(m.ty(), &p, 2),
+                Err(ProtocolError::UnknownType { ty: m.ty() })
+            );
+            assert_eq!(check_agent_role(m.ty(), Role::SessionAgent), Ok(()));
+            assert_eq!(
+                check_agent_role(m.ty(), Role::WinlogonAgent),
+                Err(ProtocolError::WrongRole {
+                    ty: m.ty(),
+                    role: 2
+                })
+            );
+        }
+        let to_agent = [
+            ClipboardToAgent::SetFiles(12),
+            ClipboardToAgent::SendFile { copy: 2, index: 0 },
+            ClipboardToAgent::SetFileContent { index: 1, len: 0 },
+            ClipboardToAgent::SetFileChunk(vec![2; 3]),
+            ClipboardToAgent::AbandonFile { index: 1 },
+            ClipboardToAgent::FileAcked(1),
+            ClipboardToAgent::StopFile { index: 1 },
+        ];
+        for m in to_agent {
+            let p = m.payload().unwrap();
+            assert_eq!(
+                ToAgentAny::decode(m.ty(), &p, 3),
+                Ok(ToAgentAny::Clipboard(m.clone()))
+            );
+            assert_eq!(
+                ToAgentAny::decode(m.ty(), &p, 2),
+                Err(ProtocolError::UnknownType { ty: m.ty() })
+            );
+        }
+        // Limits and layouts.
+        assert!(
+            ToService::ClipboardFiles(MAX_MANIFEST_LEN + 1)
+                .payload()
+                .is_err()
+        );
+        assert_eq!(
+            ToService::decode(CLIPBOARD_FILES, &(MAX_MANIFEST_LEN + 1).to_le_bytes(), 3),
+            Err(ProtocolError::InvalidField {
+                ty: CLIPBOARD_FILES
+            })
+        );
+        assert!(ToService::FileChunk(Vec::new()).payload().is_err());
+        assert!(
+            ClipboardToAgent::SetFileChunk(Vec::new())
+                .payload()
+                .is_err()
+        );
+        assert_eq!(
+            ToService::decode(FILE_CONTENT, &[0; 11], 3),
+            Err(ProtocolError::PayloadLength {
+                ty: FILE_CONTENT,
+                expected: 12,
+                actual: 11
+            })
         );
     }
 

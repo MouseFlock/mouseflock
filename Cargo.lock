@@ -891,6 +891,7 @@ dependencies = [
  "ipc",
  "model",
  "png 0.18.1",
+ "proto",
  "tokio",
  "win32-clipboard",
  "win32-input",
@@ -921,6 +922,7 @@ dependencies = [
  "model",
  "pairing",
  "policy",
+ "proto",
  "rand_core 0.6.4",
  "serde",
  "serde_json",
@@ -5021,6 +5023,7 @@ version = "0.1.0"
 dependencies = [
  "png 0.18.1",
  "windows 0.61.3",
+ "windows-core 0.61.2",
 ]
 
 [[package]]

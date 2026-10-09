@@ -7,6 +7,7 @@
 //! - [`message`]: `Hello` with role and version, and the agent link's
 //!   messages, with their directions.
 //! - [`clock`]: aligning the agent's clock with the service's.
+//! - [`files`]: file runs and their flow-control window (version 3).
 //! - [`ui`]: the UI link's messages: commands from a UI, and the service's
 //!   status and notices.
 //! - [`link`]: both ends of the agent link and of the UI link as async
@@ -30,6 +31,7 @@
 pub mod clipboard;
 pub mod clock;
 pub mod error;
+pub mod files;
 pub mod frame;
 pub mod link;
 pub mod message;
@@ -38,7 +40,7 @@ pub mod ui;
 pub use error::{EncodeError, ProtocolError};
 
 /// Highest IPC version this release speaks, exchanged in `Hello`.
-pub const IPC_VERSION: u16 = 2;
+pub const IPC_VERSION: u16 = 3;
 
 /// Lowest IPC version this release speaks.
 pub const MIN_IPC_VERSION: u16 = 1;

@@ -4,6 +4,7 @@
 
 use proto::clipboard::{self, ClipboardMessage, TransferReader, TransferStep};
 use proto::datagram::MAX_DATAGRAM_LEN;
+use proto::files::{self, FileContentRequest, FileEntry, Manifest};
 use proto::frame::{self, Decoded, HEADER_LEN};
 use proto::hello::Hello;
 use proto::input::{
@@ -95,6 +96,24 @@ fn decode_payload(m: Message<'_>) {
         assert_eq!(decoded.ty(), m.info.ty);
         assert_eq!(decoded.payload(), m.payload);
     }
+    if m.info.ty == registry::FILE_CONTENT_REQUEST
+        && let Ok(decoded) = FileContentRequest::decode(m.payload)
+    {
+        assert_eq!(decoded.payload(), m.payload);
+    }
+}
+
+/// Parses `bytes` as a manifest; one that parses re-encodes to the same
+/// bytes, and its entries all pass the path check.
+fn parse_manifest(bytes: &[u8]) {
+    if let Ok(m) = Manifest::parse(bytes) {
+        let entries: Vec<FileEntry<'_>> = m.entries().collect();
+        assert_eq!(entries.len() as u32, m.count());
+        assert!(entries.iter().all(|e| files::check_path(e.path).is_ok()));
+        let mut out = Vec::new();
+        files::encode_manifest(entries, &mut out).unwrap();
+        assert_eq!(out, bytes);
+    }
 }
 
 /// Feeds a clipboard-stream message to the reader: a chunk is exactly the
@@ -103,6 +122,7 @@ fn read_transfer(reader: &mut TransferReader, m: Message<'_>) {
     if let Ok(TransferStep::Chunk(c)) = reader.on_message(m.info.ty, m.payload) {
         assert_eq!(c, m.payload);
         let _ = clipboard::text(c);
+        parse_manifest(c);
     }
     let _ = reader.finish();
 }
@@ -125,7 +145,7 @@ fn valid_frames(rng: &mut Rng) -> Vec<u8> {
     let mut out = Vec::new();
     Hello::this_release().encode_frame(&mut out).unwrap();
     for _ in 0..rng.below(4) {
-        let pick = rng.below(5);
+        let pick = rng.below(7);
         if pick == 0 {
             pairing_message(rng).encode_frame(&mut out).unwrap();
         } else if pick == 1 {
@@ -145,8 +165,35 @@ fn valid_frames(rng: &mut Rng) -> Vec<u8> {
             for chunk in text.chunks(1 + rng.below(8)) {
                 clipboard::encode_chunk(chunk, &mut out).unwrap();
             }
+        } else if pick == 4 {
+            let mut manifest = Vec::new();
+            files::encode_manifest(manifest_entries(rng), &mut manifest).unwrap();
+            clipboard::encode_files_data(rng.next(), manifest.len() as u32, &mut out).unwrap();
+            for chunk in manifest.chunks(1 + rng.below(16)) {
+                clipboard::encode_chunk(chunk, &mut out).unwrap();
+            }
+        } else if pick == 5 {
+            if rng.below(2) == 0 {
+                let r = FileContentRequest {
+                    id: rng.next(),
+                    index: rng.next() as u32,
+                };
+                r.encode(&mut out).unwrap();
+            } else {
+                let body = rng.bytes_below(24);
+                files::encode_content_data(
+                    rng.next(),
+                    rng.next() as u32,
+                    body.len() as u64,
+                    &mut out,
+                )
+                .unwrap();
+                for chunk in body.chunks(1 + rng.below(8)) {
+                    clipboard::encode_chunk(chunk, &mut out).unwrap();
+                }
+            }
         } else {
-            let ty = rng.below(0x16) as u16;
+            let ty = rng.below(0x19) as u16;
             let payload = rng.bytes_below(12);
             frame::encode(ty, &payload, &mut out).unwrap();
         }
@@ -155,6 +202,21 @@ fn valid_frames(rng: &mut Rng) -> Vec<u8> {
 }
 
 const NAMES: [&str; 3] = ["A", "DESK-B", "Living room PC"];
+
+const PATHS: [&str; 5] = ["a", "a/b.txt", "Photos", "Photos/sub/x.png", "名前.txt"];
+
+fn manifest_entries(rng: &mut Rng) -> Vec<FileEntry<'static>> {
+    (0..=rng.below(4))
+        .map(|_| {
+            let is_dir = rng.below(2) == 0;
+            FileEntry {
+                path: PATHS[rng.below(PATHS.len())],
+                is_dir,
+                size: if is_dir { 0 } else { rng.next() >> 40 },
+            }
+        })
+        .collect()
+}
 
 fn array<const N: usize>(rng: &mut Rng) -> [u8; N] {
     rng.bytes(N).try_into().unwrap()
@@ -285,6 +347,19 @@ fn mutated_frames_never_panic() {
         mutate(&mut input, &mut rng);
         drive_stream(&mut Session::new(Hello::this_release()), &input, &mut rng);
         drive_stream(&mut agreed_session(), &input, &mut rng);
+    }
+}
+
+#[test]
+fn mutated_manifests_never_panic() {
+    let mut rng = Rng(0x3c6e_f372_fe94_f82b);
+    for _ in 0..ITERATIONS {
+        let mut input = Vec::new();
+        files::encode_manifest(manifest_entries(&mut rng), &mut input).unwrap();
+        mutate(&mut input, &mut rng);
+        parse_manifest(&input);
+        let random = rng.bytes_below(64);
+        parse_manifest(&random);
     }
 }
 

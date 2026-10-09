@@ -13,6 +13,7 @@
 
 #![forbid(unsafe_code)]
 
+mod files;
 mod link;
 
 use std::process::ExitCode;

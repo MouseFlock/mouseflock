@@ -165,26 +165,44 @@ async fn text_transfers_on_its_own_stream() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn second_stream_waits() {
+async fn second_copy_stream_waits_unread() {
     let (client, mut a) = member_client("A");
+    let peer = client.identity.peer_id();
     let (connection, _send, _recv) = up_client(&client, &mut a).await;
-    // An unfinished transfer holds the only clipboard stream allowed.
+    // An unfinished copy holds the copy lane.
     let mut first = connection.open_uni().await.unwrap();
     let mut out = Vec::new();
     clipboard::encode_data(1, 10, &mut out).unwrap();
     first.write_all(&out).await.unwrap();
+    // Let the first header arrive and take the lane.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    // A second copy opens (two streams are allowed) but waits unread.
+    let mut second = connection.open_uni().await.unwrap();
+    second.write_all(&transfer(2, b"second")).await.unwrap();
+    second.finish().unwrap();
+    a.none_for(Duration::from_millis(500), text_from(peer))
+        .await;
+    // A third waits for the peer's stream credit.
     assert!(
         timeout(Duration::from_millis(500), connection.open_uni())
             .await
             .is_err(),
-        "a second clipboard stream opened while the first was unfinished"
+        "a third clipboard stream opened while two were unfinished"
     );
-    // Finishing the first frees the slot.
+    // Finishing the first lets the second be read, in turn.
     out.clear();
     clipboard::encode_chunk(b"0123456789", &mut out).unwrap();
     first.write_all(&out).await.unwrap();
     first.finish().unwrap();
-    a.expect(WAIT, text_from(client.identity.peer_id())).await;
+    let ids = [
+        a.expect(WAIT, text_from(peer)).await,
+        a.expect(WAIT, text_from(peer)).await,
+    ]
+    .map(|e| match e {
+        Event::ClipboardData { id, .. } => id,
+        _ => unreachable!(),
+    });
+    assert_eq!(ids, [1, 2]);
     timeout(WAIT, connection.open_uni()).await.unwrap().unwrap();
 }
 

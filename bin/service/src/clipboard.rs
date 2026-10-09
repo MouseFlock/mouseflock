@@ -2,9 +2,11 @@
 //! (add-text-clipboard design D1, add-clipboard-images D3, D4). Pure: the host
 //! feeds it events and carries out what it returns. Copies follow the cursor:
 //! a copy is offered without its contents, and fetched by a machine when the
-//! cursor arrives there. Text and images are the same to it: the kind only
-//! decides how the contents travel, which is the host's and the node's
-//! business.
+//! cursor arrives there. Text, images and files are the same to it: the kind
+//! only decides how the contents travel, which is the host's and the node's
+//! business. For files it also keeps what maps a file request to the agent
+//! that serves it, and a paste to the member that owns it
+//! (add-clipboard-files D2, D4).
 
 use std::time::{Duration, Instant};
 
@@ -41,6 +43,11 @@ pub struct Tracker {
     holding: Option<Clip>,
     /// A request in flight, and when it gives up unless more bytes arrive.
     fetch: Option<(Clip, Instant)>,
+    /// When the held copy is files: its ID and the agent's number for it.
+    held_files: Option<(u64, u32)>,
+    /// The file copy the agent was last given to paste: its number on the
+    /// agent link, and whose copy it is.
+    pasting: Option<(u32, Clip)>,
 }
 
 impl Tracker {
@@ -55,6 +62,40 @@ impl Tracker {
         self.holding = Some(clip);
         self.held = Some((id, contents));
         self.fetch = None;
+        self.held_files = None;
+    }
+
+    /// The agent reported a file copy, its number `copy` on the agent link,
+    /// given `id`. As [`Tracker::local_copy`], and its files can be served.
+    pub fn local_files(&mut self, id: u64, contents: Contents, copy: u32) {
+        self.local_copy(id, contents);
+        self.held_files = Some((id, copy));
+    }
+
+    /// A member asked for a file of copy `id`: the agent's number for that
+    /// copy, if it is the file copy held here.
+    pub fn serve_file(&self, id: u64) -> Option<u32> {
+        self.held_files
+            .filter(|(held, _)| *held == id)
+            .map(|(_, copy)| copy)
+    }
+
+    /// The agent was given the copy just received, a file copy, as number
+    /// `set` on its link.
+    pub fn files_set(&mut self, set: u32) {
+        self.pasting = self.holding.map(|clip| (set, clip));
+    }
+
+    /// The agent wants a file of the copy it was given as number `set`: the
+    /// member and ID to ask, if that is the newest file copy it was given. A
+    /// paste goes on even if this machine has copied something since; a
+    /// newer file copy given to the agent ends it.
+    pub fn wanted(&self, set: u32) -> Option<(PeerId, u64)> {
+        let (given, clip) = self.pasting?;
+        match clip.owner {
+            Owner::Member(peer) if given == set => Some((peer, clip.id)),
+            _ => None,
+        }
     }
 
     /// The agent reported a copy that is not shared. Nothing earlier from
@@ -64,6 +105,7 @@ impl Tracker {
         self.holding = None;
         self.held = None;
         self.fetch = None;
+        self.held_files = None;
     }
 
     /// `peer` has a new shareable copy.
@@ -377,6 +419,60 @@ mod tests {
         );
         t.peer_down(A);
         assert_eq!(t.arrived(all, Instant::now()), Some((A, 1)));
+    }
+
+    fn files(bytes: &[u8]) -> Contents {
+        Contents::Files(std::sync::Arc::from(bytes))
+    }
+
+    #[test]
+    fn a_file_request_maps_to_the_agents_copy() {
+        let mut t = Tracker::default();
+        t.local_files(7, files(b"m"), 3);
+        assert_eq!(t.serve_file(7), Some(3));
+        assert_eq!(t.serve_file(8), None, "another copy");
+        assert_eq!(t.request(7), Some(files(b"m")));
+        // A newer copy of any kind ends serving the files.
+        t.local_copy(9, text("hello"));
+        assert_eq!(t.serve_file(7), None);
+        t.local_files(10, files(b"n"), 4);
+        t.local_not_shared();
+        assert_eq!(t.serve_file(10), None);
+    }
+
+    #[test]
+    fn a_paste_maps_to_the_owning_member() {
+        let mut t = Tracker::default();
+        let now = Instant::now();
+        t.offer(A, 5);
+        assert_eq!(t.arrived(all, now), Some((A, 5)));
+        assert_eq!(t.received(A, 5, files(b"m"), now), Some(files(b"m")));
+        t.files_set(1);
+        assert_eq!(t.wanted(1), Some((A, 5)));
+        assert_eq!(t.wanted(2), None, "not the set given");
+        // This machine copying something goes on with the paste.
+        t.local_copy(6, text("x"));
+        assert_eq!(t.wanted(1), Some((A, 5)));
+        // A newer file copy given to the agent ends it.
+        t.offer(B, 8);
+        t.arrived(all, now);
+        t.received(B, 8, files(b"n"), now);
+        t.files_set(2);
+        assert_eq!(t.wanted(1), None);
+        assert_eq!(t.wanted(2), Some((B, 8)));
+    }
+
+    #[test]
+    fn newest_copy_wins_across_text_images_and_files() {
+        let mut t = Tracker::default();
+        let now = Instant::now();
+        t.offer(A, 1);
+        t.local_copy(2, image(&[1]));
+        t.offer(B, 3);
+        assert_eq!(t.arrived(all, now), Some((B, 3)));
+        assert_eq!(t.received(B, 3, files(b"m"), now), Some(files(b"m")));
+        t.offer(A, 4);
+        assert_eq!(t.arrived(all, now), Some((A, 4)), "text after files");
     }
 
     #[test]

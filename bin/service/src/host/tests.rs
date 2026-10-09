@@ -6,6 +6,7 @@ use std::net::Ipv4Addr;
 use std::path::PathBuf;
 
 use ipc::clipboard::{NotShared, PNG_SIGNATURE};
+use ipc::files::Credit;
 use ipc::link::{AgentEnd, AgentRole, FromService, ServiceEnd, ServiceHandle};
 use ipc::message::ToService;
 use model::{InputAction, InputEvent, Key, Monitor, MonitorId, Origin, Point, Rect, Screen};
@@ -202,6 +203,7 @@ struct Agent {
 enum Set {
     Text(String),
     Image(Vec<u8>),
+    Files { set: u32, manifest: Vec<u8> },
 }
 
 impl Agent {
@@ -252,6 +254,9 @@ impl Agent {
                 }
                 Ok(Some(FromService::SetClipboard(text))) => self.set.push(Set::Text(text)),
                 Ok(Some(FromService::SetClipboardImage(png))) => self.set.push(Set::Image(png)),
+                Ok(Some(FromService::SetClipboardFiles { set, manifest })) => {
+                    self.set.push(Set::Files { set, manifest });
+                }
                 _ => return None,
             }
         }
@@ -284,6 +289,9 @@ impl Agent {
             match tokio::time::timeout_at(deadline, self.commands.recv()).await {
                 Ok(Some(FromService::SetClipboard(text))) => return Set::Text(text),
                 Ok(Some(FromService::SetClipboardImage(png))) => return Set::Image(png),
+                Ok(Some(FromService::SetClipboardFiles { set, manifest })) => {
+                    return Set::Files { set, manifest };
+                }
                 Ok(Some(FromService::Command(c))) => self.seen.push(c),
                 _ => panic!("no clipboard set; seen {:?}", self.seen),
             }
@@ -294,7 +302,7 @@ impl Agent {
     async fn set_text(&mut self) -> String {
         match self.next_set().await {
             Set::Text(text) => text,
-            Set::Image(png) => panic!("an image of {} bytes, not text", png.len()),
+            other => panic!("{other:?}, not text"),
         }
     }
 
@@ -302,7 +310,89 @@ impl Agent {
     async fn set_image(&mut self) -> Vec<u8> {
         match self.next_set().await {
             Set::Image(png) => png,
-            Set::Text(text) => panic!("text {text:?}, not an image"),
+            other => panic!("{other:?}, not an image"),
+        }
+    }
+
+    /// The next file copy the service tells this agent to offer for paste:
+    /// its number on the link, and its manifest.
+    async fn set_files(&mut self) -> (u32, Vec<u8>) {
+        match self.next_set().await {
+            Set::Files { set, manifest } => (set, manifest),
+            other => panic!("{other:?}, not files"),
+        }
+    }
+
+    /// Reports a copy of files, as the agent does after the user copies them
+    /// in Explorer.
+    fn copy_files(&self, manifest: &[u8]) {
+        assert!(
+            self.reports
+                .send_clipboard_files(manifest)
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    /// The next file message from the service, keeping commands and sets
+    /// seen on the way.
+    async fn file_message(&mut self) -> FromService {
+        let deadline = Instant::now() + WAIT;
+        loop {
+            match tokio::time::timeout_at(deadline, self.commands.recv()).await {
+                Ok(Some(FromService::Command(c))) => self.seen.push(c),
+                Ok(Some(FromService::SetClipboard(text))) => self.set.push(Set::Text(text)),
+                Ok(Some(FromService::SetClipboardImage(png))) => self.set.push(Set::Image(png)),
+                Ok(Some(FromService::SetClipboardFiles { set, manifest })) => {
+                    self.set.push(Set::Files { set, manifest });
+                }
+                Ok(Some(m)) => return m,
+                _ => panic!("no file message; seen {:?}", self.seen),
+            }
+        }
+    }
+
+    /// Serves `body` when the service asks for a file of copy `copy`, as the
+    /// agent does, within the window.
+    async fn serve(&mut self, copy: u32, body: &[u8]) {
+        let FromService::SendFile { copy: asked, index } = self.file_message().await else {
+            panic!("not asked to serve a file");
+        };
+        assert_eq!(asked, copy);
+        self.reports.start_file(index, body.len() as u64).unwrap();
+        let mut credit = Credit::default();
+        let mut sent = 0;
+        while sent < body.len() {
+            let end = (sent + 65_536).min(body.len());
+            while credit.room() < (end - sent) as u64 {
+                match self.file_message().await {
+                    FromService::FileAcked(n) => credit.acknowledged(n),
+                    other => panic!("{other:?}"),
+                }
+            }
+            self.reports.file_chunk(&body[sent..end]).unwrap();
+            credit.sent(end - sent);
+            sent = end;
+        }
+    }
+
+    /// Pastes file `index` of the file copy set as `set`, as the agent does
+    /// when Explorer reads it: asks, then reads it to its end, acknowledging
+    /// every byte. `None` if the service abandons it.
+    async fn paste(&mut self, set: u32, index: u32) -> Option<Vec<u8>> {
+        self.reports.want_file(set, index).unwrap();
+        let mut body = Vec::new();
+        loop {
+            match self.file_message().await {
+                FromService::FileStarted { .. } => {}
+                FromService::FileBytes(b) => {
+                    self.reports.file_consumed(b.len() as u32).unwrap();
+                    body.extend(b);
+                }
+                FromService::FileEnded { .. } => return Some(body),
+                FromService::FileAbandoned { .. } => return None,
+                other => panic!("{other:?}"),
+            }
         }
     }
 
@@ -317,7 +407,9 @@ impl Agent {
                 FromService::SetClipboardImage(png) => {
                     panic!("unexpected image set, {} bytes", png.len())
                 }
+                FromService::SetClipboardFiles { .. } => panic!("unexpected files set"),
                 FromService::Command(c) => self.seen.push(c),
+                _ => {}
             }
         }
     }
@@ -1308,6 +1400,118 @@ async fn member_running_0_1_0_gets_text_but_no_image_offers() {
         "{:?}",
         a.seen
     );
+}
+
+/// A manifest of `entries`: path, whether a directory, size.
+fn manifest(entries: &[(&str, bool, u64)]) -> Vec<u8> {
+    let mut out = Vec::new();
+    proto::files::encode_manifest(
+        entries
+            .iter()
+            .map(|&(path, is_dir, size)| proto::files::FileEntry { path, is_dir, size }),
+        &mut out,
+    )
+    .unwrap();
+    out
+}
+
+fn file_body(len: usize, seed: u8) -> Vec<u8> {
+    (0..len)
+        .map(|i| (i as u8).wrapping_mul(29) ^ seed)
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn files_copied_on_a_paste_on_b_pulling_bytes_on_paste() {
+    let (_a, _b, mut agent_a, mut agent_b) = linked().await;
+    let body = file_body(3 * 1024 * 1024 + 7, 5);
+    let tree = manifest(&[
+        ("Photos", true, 0),
+        ("Photos/a.bin", false, body.len() as u64),
+        ("Photos/empty", true, 0),
+    ]);
+    agent_a.copy_files(&tree);
+    settle().await;
+    agent_b.no_set_for(Duration::from_millis(100)).await;
+    cross_to_b(&mut agent_a, &mut agent_b).await;
+    // The manifest arrives with the cursor, no bytes.
+    let (set, got) = agent_b.set_files().await;
+    assert_eq!(got, tree);
+    // Pasting file 1 fetches it from A's agent, through both services.
+    let ((), pasted) = tokio::join!(agent_a.serve(1, &body), agent_b.paste(set, 1));
+    assert!(pasted.unwrap() == body, "the file arrived changed");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_paste_of_a_copy_no_longer_given_is_abandoned() {
+    let (_a, _b, _agent_a, mut agent_b) = linked().await;
+    assert_eq!(agent_b.paste(9, 0).await, None);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_member_that_understands_images_but_not_files_gets_no_file_offers() {
+    let (mut a, mut old) = (
+        pc("A", temp_dir("mixed-files-a")),
+        pc_speaking(
+            "Old",
+            temp_dir("mixed-files-old"),
+            transport::Hello { min: 1, max: 2 },
+        ),
+    );
+    pair(&mut a, &mut old).await;
+    let mut agent_a = a.agent("A1").await;
+    let mut agent_old = old.agent("O1").await;
+    for agent in [&mut agent_a, &mut agent_old] {
+        assert_eq!(
+            agent.next().await,
+            ToAgent::SetCapture(CaptureMode::PassAll)
+        );
+    }
+    settle().await;
+    agent_a.copy_files(&manifest(&[("a.txt", false, 3)]));
+    settle().await;
+    cross_to_b(&mut agent_a, &mut agent_old).await;
+    agent_old.no_set_for(Duration::from_millis(500)).await;
+    b_takes_back(&mut a, &agent_old).await;
+    agent_a.copy_image(&png_like(64, 4));
+    settle().await;
+    cross_to_b(&mut agent_a, &mut agent_old).await;
+    assert_eq!(agent_old.set_image().await, png_like(64, 4));
+    assert!(
+        !a.seen.iter().any(|r| matches!(r, Report::PeerDown { .. })),
+        "{:?}",
+        a.seen
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn log_has_no_file_names() {
+    let (a, b, mut agent_a, mut agent_b) = linked().await;
+    let body = b"zq-deskhop-file-bytes-5512".to_vec();
+    agent_a.copy_files(&manifest(&[(
+        "salary-zq7731.xlsx",
+        false,
+        body.len() as u64,
+    )]));
+    settle().await;
+    cross_to_b(&mut agent_a, &mut agent_b).await;
+    let (set, _) = agent_b.set_files().await;
+    let ((), pasted) = tokio::join!(agent_a.serve(1, &body), agent_b.paste(set, 0));
+    assert_eq!(pasted.unwrap(), body);
+    let lines: Vec<String> = a.log.lines().into_iter().chain(b.log.lines()).collect();
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("clipboard: set files, 1 files totalling 26 bytes")),
+        "{lines:#?}"
+    );
+    for line in &lines {
+        assert!(!line.contains("salary"), "a file name in the log: {line}");
+        assert!(
+            !line.contains("zq-deskhop"),
+            "file bytes in the log: {line}"
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]

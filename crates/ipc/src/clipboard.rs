@@ -3,13 +3,16 @@
 //!
 //! A copy travels as a run: a start message announcing its length
 //! (`ClipboardText` or `SetClipboard` for text; from IPC version 2,
-//! `ClipboardImage` or `SetClipboardImage` for an image as one PNG), then
+//! `ClipboardImage` or `SetClipboardImage` for an image as one PNG; from
+//! version 3, `ClipboardFiles` or `SetClipboardFiles` for a file copy's
+//! manifest, checked here only for its length), then
 //! chunks carrying exactly that many bytes. Other messages may come between
 //! the chunks. [`RunAssembler`] enforces the run rules at the receiving end
 //! and hands back the copy once it is complete. An image's bytes are checked
 //! only for their length and the PNG signature, never decoded.
 
 use crate::ProtocolError;
+use crate::files::MAX_MANIFEST_LEN;
 use crate::frame::MAX_PAYLOAD;
 
 /// Most bytes of UTF-8 text one run may carry (4 MiB).
@@ -27,6 +30,8 @@ pub enum Kind {
     Text,
     /// One PNG file. IPC version 2.
     Image,
+    /// A file copy's manifest. IPC version 3.
+    Files,
 }
 
 impl Kind {
@@ -34,6 +39,7 @@ impl Kind {
         match self {
             Self::Text => MAX_TEXT_LEN,
             Self::Image => MAX_IMAGE_LEN,
+            Self::Files => MAX_MANIFEST_LEN,
         }
     }
 }
@@ -44,11 +50,12 @@ pub enum NotShared {
     /// Marked by the copying app to stay out of clipboard monitoring,
     /// history or cloud sync.
     Private,
-    /// Neither text nor an image the agent can share; at IPC version 1, any
-    /// copy without text.
+    /// Neither text, an image nor files the agent can share; at IPC version
+    /// 1, any copy without text, and at version 2 any without text or an
+    /// image.
     NoText,
-    /// Text over [`MAX_TEXT_LEN`] bytes of UTF-8, or an image over the image
-    /// limits.
+    /// Text over [`MAX_TEXT_LEN`] bytes of UTF-8, an image over the image
+    /// limits, or files over the file copy limits.
     TooLarge,
 }
 
@@ -86,15 +93,8 @@ pub enum Run {
     Text(String),
     /// One PNG file, checked only for its signature and length.
     Image(Vec<u8>),
-}
-
-impl From<Run> for Copied {
-    fn from(run: Run) -> Self {
-        match run {
-            Run::Text(t) => Self::Text(t),
-            Run::Image(b) => Self::Image(b),
-        }
-    }
+    /// A file copy's manifest, checked only for its length.
+    Files(Vec<u8>),
 }
 
 /// `bytes` split into chunk payloads of at most one frame each. Nothing has
@@ -182,6 +182,7 @@ impl RunAssembler {
                 .map(|t| Some(Run::Text(t)))
                 .map_err(|_| ProtocolError::InvalidField { ty }),
             Kind::Image => Ok(Some(Run::Image(done.bytes))),
+            Kind::Files => Ok(Some(Run::Files(done.bytes))),
         }
     }
 
@@ -324,6 +325,20 @@ mod tests {
         assert_eq!(
             c.chunk(CHUNK, &[0xff, 0xfe]),
             Err(ProtocolError::InvalidField { ty: CHUNK })
+        );
+    }
+
+    #[test]
+    fn manifest_runs_are_bounded_by_length_only() {
+        let mut a = RunAssembler::default();
+        assert_eq!(
+            a.start(0x0040, Kind::Files, MAX_MANIFEST_LEN + 1),
+            Err(ProtocolError::InvalidField { ty: 0x0040 })
+        );
+        assert_eq!(a.start(0x0040, Kind::Files, 3), Ok(None));
+        assert_eq!(
+            a.chunk(CHUNK, b"\xff\0x"),
+            Ok(Some(Run::Files(b"\xff\0x".to_vec())))
         );
     }
 

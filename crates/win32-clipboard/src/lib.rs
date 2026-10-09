@@ -7,9 +7,12 @@
 //!   to UTF-8 within the 4 MiB limit.
 //! - [`image`]: bitmaps to PNG and back, as pure functions, with the image
 //!   limits.
+//! - [`files`]: files offered for paste without their bytes, as an OLE data
+//!   object whose per-file streams read from a source only on paste.
 //! - [`start`]: the `deskhop-clipboard` thread, which reports each settled
 //!   copy and sets text without reporting it back.
 
+pub mod files;
 pub mod image;
 mod listener;
 pub mod text;

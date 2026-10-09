@@ -5,11 +5,16 @@
 //! each chunk's bytes back; like every decoder here it buffers nothing, so the
 //! caller owns the bytes it collects and can bound them by the kind's limit.
 //!
-//! A stream carries text (`ClipboardData`, version 1) or an image as one PNG
-//! (`ClipboardImageData`, version 2). An image's bytes are never decoded here:
-//! only its length and its first eight bytes, the PNG signature, are checked.
+//! A stream carries text (`ClipboardData`, version 1), an image as one PNG
+//! (`ClipboardImageData`, version 2), a file copy's manifest
+//! (`ClipboardFilesData`, version 3) or one file's contents
+//! (`FileContentData`, version 3, a u64 length with no small cap). An image's
+//! bytes are never decoded here: only its length and its first eight bytes,
+//! the PNG signature, are checked. A manifest is checked by
+//! [`crate::files::Manifest::parse`] once collected.
 
 use crate::codec::fixed_payload;
+use crate::files::{self, MAX_MANIFEST_LEN};
 use crate::{EncodeError, ProtocolError, frame, registry};
 
 /// Most bytes of UTF-8 text one transfer may carry (4 MiB).
@@ -28,6 +33,10 @@ pub enum ClipKind {
     Text,
     /// One PNG file, at most [`MAX_IMAGE_LEN`] bytes. Protocol version 2.
     Image,
+    /// A file copy, carried as its manifest, at most [`MAX_MANIFEST_LEN`]
+    /// bytes. The files' contents travel on streams of their own, one per
+    /// file, when asked for. Protocol version 3.
+    Files,
 }
 
 impl ClipKind {
@@ -36,6 +45,7 @@ impl ClipKind {
         match self {
             Self::Text => MAX_TEXT_LEN,
             Self::Image => MAX_IMAGE_LEN,
+            Self::Files => MAX_MANIFEST_LEN,
         }
     }
 
@@ -44,6 +54,7 @@ impl ClipKind {
         match self {
             Self::Text => 1,
             Self::Image => 2,
+            Self::Files => 3,
         }
     }
 }
@@ -108,6 +119,13 @@ pub fn encode_image_data(id: u64, len: u32, out: &mut Vec<u8>) -> Result<(), Enc
     encode_header(registry::CLIPBOARD_IMAGE_DATA, id, len, out)
 }
 
+/// Appends a manifest clipboard stream's first frame: `ClipboardFilesData`
+/// with `id` and the manifest's length. Only for a connection at version 3
+/// or later.
+pub fn encode_files_data(id: u64, len: u32, out: &mut Vec<u8>) -> Result<(), EncodeError> {
+    encode_header(registry::CLIPBOARD_FILES_DATA, id, len, out)
+}
+
 /// Appends the header frame for a transfer of `kind`.
 pub fn encode_header_for(
     kind: ClipKind,
@@ -118,6 +136,7 @@ pub fn encode_header_for(
     match kind {
         ClipKind::Text => encode_data(id, len, out),
         ClipKind::Image => encode_image_data(id, len, out),
+        ClipKind::Files => encode_files_data(id, len, out),
     }
 }
 
@@ -144,6 +163,9 @@ pub enum TransferStep<'a> {
     /// The transfer's header: which copy, what it carries, and how many bytes
     /// follow.
     Started { id: u64, kind: ClipKind, len: u32 },
+    /// A file content stream's header: which copy, which file of its
+    /// manifest, and how many bytes follow. Version 3.
+    FileStarted { id: u64, index: u32, len: u64 },
     /// More of the copy's bytes.
     Chunk(&'a [u8]),
 }
@@ -154,16 +176,17 @@ enum State {
     /// `signed` counts the leading bytes already checked against the PNG
     /// signature; text starts at 8, so nothing is checked.
     Body {
-        remaining: u32,
+        remaining: u64,
         signed: usize,
     },
     Failed,
 }
 
 /// Checks the frames of one clipboard stream: exactly one header first
-/// (`ClipboardData`, or from version 2 `ClipboardImageData`), then non-empty
-/// chunks totalling exactly its length, within the kind's limit. An image's
-/// first eight bytes must be the PNG signature, wherever the chunks split.
+/// (`ClipboardData`; from version 2 `ClipboardImageData`; from version 3
+/// `ClipboardFilesData` or `FileContentData`), then non-empty chunks
+/// totalling exactly its length, within the kind's limit. An image's first
+/// eight bytes must be the PNG signature, wherever the chunks split.
 #[derive(Debug, Clone)]
 pub struct TransferReader {
     state: State,
@@ -195,11 +218,27 @@ impl TransferReader {
     fn step<'a>(&mut self, ty: u16, payload: &'a [u8]) -> Result<TransferStep<'a>, ProtocolError> {
         match (self.state, ty) {
             (State::Failed, _) => Err(ProtocolError::SessionFailed),
-            (State::AwaitingData, registry::CLIPBOARD_DATA | registry::CLIPBOARD_IMAGE_DATA) => {
-                let kind = if ty == registry::CLIPBOARD_DATA {
-                    ClipKind::Text
-                } else {
-                    ClipKind::Image
+            (State::AwaitingData, registry::FILE_CONTENT_DATA) => {
+                if self.version < ClipKind::Files.since() {
+                    return Err(ProtocolError::UnknownType { ty });
+                }
+                let (id, index, len) = files::decode_content_data(payload)?;
+                self.state = State::Body {
+                    remaining: len,
+                    signed: PNG_SIGNATURE.len(),
+                };
+                Ok(TransferStep::FileStarted { id, index, len })
+            }
+            (
+                State::AwaitingData,
+                registry::CLIPBOARD_DATA
+                | registry::CLIPBOARD_IMAGE_DATA
+                | registry::CLIPBOARD_FILES_DATA,
+            ) => {
+                let kind = match ty {
+                    registry::CLIPBOARD_DATA => ClipKind::Text,
+                    registry::CLIPBOARD_IMAGE_DATA => ClipKind::Image,
+                    _ => ClipKind::Files,
                 };
                 if self.version < kind.since() {
                     return Err(ProtocolError::UnknownType { ty });
@@ -222,9 +261,13 @@ impl TransferReader {
                         return Err(ProtocolError::NotPng);
                     }
                     ClipKind::Image => 0,
+                    ClipKind::Files if len > MAX_MANIFEST_LEN => {
+                        return Err(ProtocolError::ManifestTooLong { len });
+                    }
+                    ClipKind::Files => PNG_SIGNATURE.len(),
                 };
                 self.state = State::Body {
-                    remaining: len,
+                    remaining: u64::from(len),
                     signed,
                 };
                 Ok(TransferStep::Started { id, kind, len })
@@ -233,7 +276,7 @@ impl TransferReader {
                 if payload.is_empty() {
                     return Err(ProtocolError::EmptyChunk);
                 }
-                let n = u32::try_from(payload.len()).map_err(|_| ProtocolError::TextOverrun)?;
+                let n = u64::try_from(payload.len()).map_err(|_| ProtocolError::TextOverrun)?;
                 let remaining = remaining.checked_sub(n).ok_or(ProtocolError::TextOverrun)?;
                 let signed = check_signature(signed, payload)?;
                 self.state = State::Body { remaining, signed };
@@ -294,7 +337,9 @@ mod tests {
         let mut text = Vec::new();
         while let Decoded::Frame { frame, consumed } = decode(rest)? {
             match reader.on_message(frame.ty, frame.payload)? {
-                TransferStep::Started { id: i, .. } => id = Some(i),
+                TransferStep::Started { id: i, .. } | TransferStep::FileStarted { id: i, .. } => {
+                    id = Some(i);
+                }
                 TransferStep::Chunk(c) => text.extend_from_slice(c),
             }
             rest = &rest[consumed..];
@@ -321,6 +366,7 @@ mod tests {
         while let Decoded::Frame { frame, consumed } = decode(rest)? {
             match reader.on_message(frame.ty, frame.payload)? {
                 TransferStep::Started { id, kind, .. } => head = Some((id, kind)),
+                TransferStep::FileStarted { .. } => panic!("a file content header"),
                 TransferStep::Chunk(c) => body.extend_from_slice(c),
             }
             rest = &rest[consumed..];
@@ -328,6 +374,153 @@ mod tests {
         reader.finish()?;
         let (id, kind) = head.expect("a header");
         Ok((id, kind, body))
+    }
+
+    #[test]
+    fn manifest_round_trips_at_version_3() {
+        use crate::files::{FileEntry, Manifest, encode_manifest};
+        let entries = [
+            FileEntry {
+                path: "d",
+                is_dir: true,
+                size: 0,
+            },
+            FileEntry {
+                path: "d/f.txt",
+                is_dir: false,
+                size: 9,
+            },
+        ];
+        let mut manifest = Vec::new();
+        encode_manifest(entries, &mut manifest).unwrap();
+        let mut out = Vec::new();
+        encode_files_data(4, u32::try_from(manifest.len()).unwrap(), &mut out).unwrap();
+        for chunk in manifest.chunks(5) {
+            encode_chunk(chunk, &mut out).unwrap();
+        }
+        let (id, kind, body) = read_at(3, &out).unwrap();
+        assert_eq!((id, kind), (4, ClipKind::Files));
+        let m = Manifest::parse(&body).unwrap();
+        assert_eq!(m.entries().collect::<Vec<_>>(), entries);
+    }
+
+    #[test]
+    fn file_headers_need_version_3() {
+        for version in [1, 2] {
+            let mut r = TransferReader::new(version);
+            assert_eq!(
+                r.on_message(registry::CLIPBOARD_FILES_DATA, &[0; 12]),
+                Err(ProtocolError::UnknownType {
+                    ty: registry::CLIPBOARD_FILES_DATA
+                })
+            );
+            let mut r = TransferReader::new(version);
+            assert_eq!(
+                r.on_message(registry::FILE_CONTENT_DATA, &[0; 20]),
+                Err(ProtocolError::UnknownType {
+                    ty: registry::FILE_CONTENT_DATA
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn manifest_over_its_bound_is_refused_at_the_header() {
+        let mut out = Vec::new();
+        encode_files_data(1, MAX_MANIFEST_LEN + 1, &mut out).unwrap();
+        assert_eq!(
+            read_at(3, &out),
+            Err(ProtocolError::ManifestTooLong {
+                len: MAX_MANIFEST_LEN + 1
+            })
+        );
+        let mut r = TransferReader::new(3);
+        let mut at_bound = Vec::new();
+        encode_files_data(1, MAX_MANIFEST_LEN, &mut at_bound).unwrap();
+        let frame = match decode(&at_bound).unwrap() {
+            Decoded::Frame { frame, .. } => frame,
+            Decoded::NeedMore => panic!("a whole frame"),
+        };
+        assert!(r.on_message(frame.ty, frame.payload).is_ok());
+    }
+
+    /// Feeds the frames in `bytes` to a version 3 reader.
+    fn feed(reader: &mut TransferReader, bytes: &[u8]) -> Result<Vec<u8>, ProtocolError> {
+        let mut rest = bytes;
+        let mut body = Vec::new();
+        while let Decoded::Frame { frame, consumed } = decode(rest)? {
+            if let TransferStep::Chunk(c) = reader.on_message(frame.ty, frame.payload)? {
+                body.extend_from_slice(c);
+            }
+            rest = &rest[consumed..];
+        }
+        Ok(body)
+    }
+
+    #[test]
+    fn file_content_has_a_u64_length_and_no_small_cap() {
+        let five_gib: u64 = 5 << 30;
+        let mut out = Vec::new();
+        files::encode_content_data(7, 2, five_gib, &mut out).unwrap();
+        let mut r = TransferReader::new(3);
+        let frame = match decode(&out).unwrap() {
+            Decoded::Frame { frame, .. } => frame,
+            Decoded::NeedMore => panic!("a whole frame"),
+        };
+        assert_eq!(
+            r.on_message(frame.ty, frame.payload),
+            Ok(TransferStep::FileStarted {
+                id: 7,
+                index: 2,
+                len: five_gib
+            })
+        );
+        // Bytes past 4 GiB of header length are counted in a u64: the
+        // remainder after one chunk is still over u32::MAX.
+        let chunk = [0x55; 1000];
+        assert_eq!(
+            r.on_message(registry::CLIPBOARD_CHUNK, &chunk),
+            Ok(TransferStep::Chunk(&chunk))
+        );
+        assert_eq!(
+            r.finish(),
+            Err(ProtocolError::TextIncomplete {
+                remaining: five_gib - 1000
+            })
+        );
+    }
+
+    #[test]
+    fn file_content_must_total_exactly() {
+        let mut exact = Vec::new();
+        files::encode_content_data(1, 0, 5, &mut exact).unwrap();
+        encode_chunk(b"hel", &mut exact).unwrap();
+        encode_chunk(b"lo", &mut exact).unwrap();
+        let mut r = TransferReader::new(3);
+        assert_eq!(feed(&mut r, &exact), Ok(b"hello".to_vec()));
+        assert_eq!(r.finish(), Ok(()));
+
+        let mut over = exact.clone();
+        encode_chunk(b"!", &mut over).unwrap();
+        let mut r = TransferReader::new(3);
+        assert_eq!(feed(&mut r, &over), Err(ProtocolError::TextOverrun));
+
+        // A second header on the same stream is out of order.
+        let mut twice = exact;
+        files::encode_content_data(1, 1, 1, &mut twice).unwrap();
+        let mut r = TransferReader::new(3);
+        assert_eq!(
+            feed(&mut r, &twice),
+            Err(ProtocolError::TransferOrder {
+                ty: registry::FILE_CONTENT_DATA
+            })
+        );
+        // An empty file is a header and nothing else.
+        let mut empty = Vec::new();
+        files::encode_content_data(1, 0, 0, &mut empty).unwrap();
+        let mut r = TransferReader::new(3);
+        assert_eq!(feed(&mut r, &empty), Ok(Vec::new()));
+        assert_eq!(r.finish(), Ok(()));
     }
 
     /// An image stream carrying `bytes`, split into chunks of `chunk` bytes.

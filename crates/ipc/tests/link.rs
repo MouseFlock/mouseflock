@@ -118,7 +118,7 @@ async fn handshake_agrees_this_release_version() {
     );
     let (service, _) = service.unwrap();
     let (agent, _) = agent.unwrap();
-    assert_eq!((service.version(), agent.version()), (2, 2));
+    assert_eq!((service.version(), agent.version()), (3, 3));
 }
 
 #[tokio::test]
@@ -141,8 +141,8 @@ async fn versions_do_not_overlap() {
         buf: Vec::new(),
     };
     raw.hello(Hello {
-        min: 3,
-        max: 4,
+        min: 4,
+        max: 5,
         role: Role::SessionAgent,
     })
     .await;

@@ -9,6 +9,7 @@ publish.workspace = true
 [dependencies]
 engine.workspace = true
 ipc.workspace = true
+proto.workspace = true
 model.workspace = true
 pairing.workspace = true
 policy.workspace = true

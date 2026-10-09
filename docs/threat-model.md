@@ -1,6 +1,6 @@
 # DeskHop threat model
 
-*Status: covers the wire, pairing, desk membership, the LAN transport, forwarded input, the agent → service and UI → service pipes, the UI app, the clipboard (text and images, including untrusted image data), the service's data folder, console mode, secure attention, the secure desktop, elevated windows on the user's desktop, and installing and uninstalling.*
+*Status: covers the wire, pairing, desk membership, the LAN transport, forwarded input, the agent → service and UI → service pipes, the UI app, the clipboard (text, images and files, including untrusted image data and arriving files), the service's data folder, console mode, secure attention, the secure desktop, elevated windows on the user's desktop, and installing and uninstalling.*
 
 DeskHop injects keystrokes received over the network, and its service runs as SYSTEM. This document records what it defends against and where.
 
@@ -156,6 +156,22 @@ Residual risks:
 - **The receiving PC treats a received copy as a local copy,** so its own clipboard history or cloud sync may keep it. Private copies are never sent, so nothing marked private is re-exposed this way.
 - **A received image is decoded in the user's session** by a third-party crate. A decoder bug a member could trigger would run at the user's privileges, not SYSTEM's, and a member can already type into this machine as that user.
 - **Service memory** can reach one 32 MiB held copy plus one 32 MiB incoming transfer per member connection. A member could send large images repeatedly; each one replaces the last, so memory stays bounded by those limits.
+
+**File transfer.** From protocol version 3, copied files follow the cursor too: what moves when the cursor arrives is the copy's manifest (each file's relative path and size), and a file's bytes move only when the user pastes it, pulled from the owner one file at a time. Specified in `openspec/specs/file-transfer/spec.md` (add-clipboard-files D6–D8).
+
+- **Only the agents touch files, as the user.** The owner's session agent reads the source files; the receiver's session agent hands the bytes to the file manager, which writes them where the user pasted. The SYSTEM service never opens, reads or writes a file: it relays bytes it does not look at, holding at most the manifest and, per direction, the agent link's 1 MiB window plus eight 64 KiB chunks of a file in flight.
+- **Untrusted manifest.** A member's manifest is checked whole, by the service and again by the agent, before anything is offered: at most 65,536 entries and 64 GiB in total, each path at most 259 UTF-16 units, and every path relative and harmless — no `..`, no drive or absolute root, no reserved character, no device name like `CON`, no name ending in a dot or a space. A manifest that breaks a rule is a protocol error, so it cannot place a file outside the folder the user pastes into, nor exhaust the receiver before the user even pastes. Windows writes the files from the descriptor's relative names under the paste target, and resolves name clashes as it does for any paste.
+- **Untrusted bytes.** A received file is whatever the member sent. It is written only where the user chose to paste, by the user's own Explorer, and nothing runs it. That is the same as a file the user downloads, and a member can already type into this machine as the user.
+- **Nothing large moves unasked.** The cursor arriving fetches only the manifest; a file's bytes are fetched only on paste, and only from the member that offered the copy, so a member cannot push data onto a machine the user did not paste on.
+- **Bounded on every leg.** File bytes stream with flow control end to end: QUIC on the LAN, and a 1 MiB window on each agent link, acknowledged as the bytes move on. A slow paste slows the owner; no side buffers a file. A short or overlong file is reset, never passed off as whole, and a paste the owner abandons fails in Explorer.
+- **Files and names stay out of logs.** The service logs that a file copy was offered, set or pasted, with the number of files and bytes, never a name or a byte.
+- **Older peers and agents are not confused.** Files are offered only on connections and agent links that agreed version 3.
+
+Residual risks:
+
+- **A member can read any file in the newest file copy,** by asking for its index, at any time while that copy is held, not only on paste. The user offered exactly those files by copying them, and a member can already type into this machine.
+- **A received file is the member's bytes.** A compromised member could offer a harmful document or program; the user pastes it as they would save a download. Explorer does not mark a pasted file as coming from another computer (no Mark of the Web), so Windows will not warn before it is opened.
+- **A paste fails if the owner goes away,** or if this machine is given a newer file copy part way through. Explorer reports the failure; nothing partial is passed off as whole.
 
 ### Identity key at rest
 

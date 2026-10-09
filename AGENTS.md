@@ -16,7 +16,7 @@ Read `docs/design-brief.md` once. Architectural decisions live in `docs/adr/` an
 Every machine runs the same install:
 
 - `deskhop-service.exe` — Windows service, SYSTEM, session 0. Owns transport, pairing keys, managed configuration. Spawns agents via `WTSQueryUserToken` + `CreateProcessAsUser`.
-- `deskhop-agent.exe --session --pipe <name>` — user desktop, as the logged-on user, with UI access (ADR 0008) so it reaches elevated windows. Low-level hooks, Raw Input, `SendInput`, clipboard.
+- `deskhop-agent.exe --session --pipe <name>` — user desktop, as the logged-on user, with UI access (ADR 0008) so it reaches elevated windows. Low-level hooks, Raw Input, `SendInput`, clipboard: text, images, and files by copy and paste (bytes pulled on paste; the service never opens a file).
 - `deskhop-agent.exe --winlogon --pipe <name>` — secure desktop, as SYSTEM with privileges removed, whether or not anyone is logged on. UAC prompts, lock and logon screens. No clipboard.
 - `DeskHop.exe` — Tauri UI. Optional. Nothing changes when it is closed.
 
