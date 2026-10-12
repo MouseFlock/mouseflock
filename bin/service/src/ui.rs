@@ -150,7 +150,7 @@ mod tests {
     }
 
     fn test_pipe(tag: &str) -> String {
-        format!(r"\\.\pipe\deskhop-ui-test-{}-{tag}", std::process::id())
+        format!(r"\\.\pipe\mouseflock-ui-test-{}-{tag}", std::process::id())
     }
 
     #[tokio::test(flavor = "multi_thread")]

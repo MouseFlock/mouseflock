@@ -66,16 +66,16 @@ fn failed(what: &str) -> impl Fn(std::io::Error) -> LaunchError + '_ {
 pub fn pipe_name() -> String {
     let mut bytes = [0u8; 16];
     OsRng.fill_bytes(&mut bytes);
-    format!(r"\\.\pipe\deskhop-agent-{}", hex(&bytes))
+    format!(r"\\.\pipe\mouseflock-agent-{}", hex(&bytes))
 }
 
-/// `deskhop-agent.exe` in this executable's own folder.
+/// `mouseflock-agent.exe` in this executable's own folder.
 pub fn agent_path() -> std::io::Result<PathBuf> {
     let exe = std::env::current_exe()?;
     let dir = exe
         .parent()
         .ok_or_else(|| std::io::Error::other("the executable has no folder"))?;
-    Ok(dir.join("deskhop-agent.exe"))
+    Ok(dir.join("mouseflock-agent.exe"))
 }
 
 /// A launched agent: its process ID, a way to end it, and its exit.
@@ -141,7 +141,7 @@ pub fn desktop(role: AgentRole) -> Desktop {
 
 /// Starts an agent of `role` for `target`: creates its pipe for the user it
 /// will run as (a fresh name, first and only instance), then launches
-/// `deskhop-agent.exe --session|--winlogon --pipe <name>` on its desktop.
+/// `mouseflock-agent.exe --session|--winlogon --pipe <name>` on its desktop.
 /// Returns the watch and the pipe, not yet connected.
 ///
 /// The session agent runs as the session's user, or in console mode as
@@ -307,7 +307,7 @@ mod tests {
         let names: BTreeSet<String> = (0..1000).map(|_| pipe_name()).collect();
         assert_eq!(names.len(), 1000);
         for n in &names {
-            let hexpart = n.strip_prefix(r"\\.\pipe\deskhop-agent-").unwrap();
+            let hexpart = n.strip_prefix(r"\\.\pipe\mouseflock-agent-").unwrap();
             assert_eq!(hexpart.len(), 32);
             assert!(hexpart.bytes().all(|b| b.is_ascii_hexdigit()));
         }

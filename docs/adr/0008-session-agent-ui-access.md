@@ -6,11 +6,11 @@
 
 ## Context
 
-ADR 0002 lists elevated windows on the user's desktop as one of the hard moments DeskHop must handle, and names a `uiAccess=true` manifest as a possible later layer, "requires signed install under Program Files".
+ADR 0002 lists elevated windows on the user's desktop as one of the hard moments MouseFlock must handle, and names a `uiAccess=true` manifest as a possible later layer, "requires signed install under Program Files".
 
 The two-PC check on 2026-10-08 confirmed the gap. The session agent runs as the logged-on user at medium integrity. Windows' User Interface Privilege Isolation (UIPI) stops a medium-integrity process from injecting input into, or hooking, a higher-integrity window, and reports neither a failed return nor an error code when it does. So when the controlled PC's foreground window is elevated — an admin terminal, Task Manager, a window a UAC prompt opened — the controller's forwarded input silently vanishes, and `docs/known-issues.md` recorded the trap.
 
-The manifest route needs an Authenticode signature chaining to a trusted root, in a secure folder. DeskHop is not yet code-signed, and a signed-only fix would break anyone building the auditable client from source.
+The manifest route needs an Authenticode signature chaining to a trusted root, in a secure folder. MouseFlock is not yet code-signed, and a signed-only fix would break anyone building the auditable client from source.
 
 ## Decision
 

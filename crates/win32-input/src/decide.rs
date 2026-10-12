@@ -2,9 +2,9 @@
 
 use model::{Button, CaptureMode, InputEvent, Origin};
 
-/// `dwExtraInfo` on every input DeskHop injects ("DHOP"). Raw Input carries
+/// `dwExtraInfo` on every input MouseFlock injects ("MFLK"). Raw Input carries
 /// it in `RAWMOUSE::ulExtraInformation`.
-pub(crate) const TAG: u32 = 0x4448_4f50;
+pub(crate) const TAG: u32 = 0x4d46_4c4b;
 
 const WM_MOUSEMOVE: u32 = 0x0200;
 const WM_LBUTTONDOWN: u32 = 0x0201;
@@ -92,9 +92,9 @@ pub(crate) fn raw_motion(us_flags: u16, dx: i32, dy: i32) -> Option<(i32, i32)> 
     (!absolute && (dx, dy) != (0, 0)).then_some((dx, dy))
 }
 
-/// The origin of a Raw Input move (design D4): DeskHop's tag means
+/// The origin of a Raw Input move (design D4): MouseFlock's tag means
 /// injected, a device handle means physical, and a report with neither
-/// follows the last move the hook saw that DeskHop did not inject.
+/// follows the last move the hook saw that MouseFlock did not inject.
 pub(crate) fn motion_origin(extra: u32, has_device: bool, last_hook_move_injected: bool) -> Origin {
     if extra == TAG {
         Origin::Injected
@@ -199,7 +199,7 @@ mod tests {
 
     #[test]
     fn motion_origins() {
-        // DeskHop's tag wins whatever else is true.
+        // MouseFlock's tag wins whatever else is true.
         assert_eq!(motion_origin(TAG, true, false), Injected);
         assert_eq!(motion_origin(TAG, false, false), Injected);
         // A device handle means physical.

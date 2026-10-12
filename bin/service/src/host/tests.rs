@@ -24,7 +24,8 @@ const CTRL: Key = Key::LEFT_CTRL;
 fn temp_dir(tag: &str) -> PathBuf {
     static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
     let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    let dir = std::env::temp_dir().join(format!("deskhop-host-{}-{tag}-{n}", std::process::id()));
+    let dir =
+        std::env::temp_dir().join(format!("mouseflock-host-{}-{tag}-{n}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     dir
@@ -49,7 +50,7 @@ fn pc(name: &str, dir: PathBuf) -> Pc {
 }
 
 /// A machine whose node advertises `hello`'s version range: narrowed to 1–1,
-/// it stands in for a PC still running DeskHop 0.1.0.
+/// it stands in for a PC that speaks only protocol version 1.
 fn pc_speaking(name: &str, dir: PathBuf, hello: transport::Hello) -> Pc {
     let log = Log::memory();
     let stored = store::load(&dir, MachineName::new(name).unwrap(), &log).unwrap();
@@ -1240,27 +1241,27 @@ async fn b_takes_back(a: &mut Pc, agent_b: &Agent) {
 #[tokio::test(flavor = "multi_thread")]
 async fn copy_then_cross_sets_text_on_b() {
     let (_a, _b, mut agent_a, mut agent_b) = linked().await;
-    agent_a.copy("deskhop copy on A");
+    agent_a.copy("mouseflock copy on A");
     settle().await;
     agent_b.no_set_for(Duration::from_millis(100)).await;
     cross_to_b(&mut agent_a, &mut agent_b).await;
-    assert_eq!(agent_b.set_text().await, "deskhop copy on A");
+    assert_eq!(agent_b.set_text().await, "mouseflock copy on A");
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn copy_on_b_then_focus_returns_to_a() {
     let (mut a, _b, mut agent_a, mut agent_b) = linked().await;
     cross_to_b(&mut agent_a, &mut agent_b).await;
-    agent_b.copy("deskhop copy on B");
+    agent_b.copy("mouseflock copy on B");
     settle().await;
     b_takes_back(&mut a, &agent_b).await;
-    assert_eq!(agent_a.set_text().await, "deskhop copy on B");
+    assert_eq!(agent_a.set_text().await, "mouseflock copy on B");
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn private_copy_is_not_offered() {
     let (_a, _b, mut agent_a, mut agent_b) = linked().await;
-    agent_a.copy("deskhop shared");
+    agent_a.copy("mouseflock shared");
     agent_a
         .reports
         .send(ToService::ClipboardNotShared(NotShared::Private))
@@ -1274,21 +1275,21 @@ async fn private_copy_is_not_offered() {
 #[tokio::test(flavor = "multi_thread")]
 async fn only_the_newest_copy_is_sent() {
     let (_a, _b, mut agent_a, mut agent_b) = linked().await;
-    agent_a.copy("deskhop first");
-    agent_a.copy("deskhop second");
+    agent_a.copy("mouseflock first");
+    agent_a.copy("mouseflock second");
     settle().await;
     cross_to_b(&mut agent_a, &mut agent_b).await;
-    assert_eq!(agent_b.set_text().await, "deskhop second");
+    assert_eq!(agent_b.set_text().await, "mouseflock second");
     agent_b.no_set_for(Duration::from_millis(300)).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn no_echo_after_set() {
     let (mut a, _b, mut agent_a, mut agent_b) = linked().await;
-    agent_a.copy("deskhop round trip");
+    agent_a.copy("mouseflock round trip");
     settle().await;
     cross_to_b(&mut agent_a, &mut agent_b).await;
-    assert_eq!(agent_b.set_text().await, "deskhop round trip");
+    assert_eq!(agent_b.set_text().await, "mouseflock round trip");
     // Back on A, nothing newer exists: A is told to set nothing.
     b_takes_back(&mut a, &agent_b).await;
     agent_a.no_set_for(Duration::from_millis(500)).await;
@@ -1297,7 +1298,7 @@ async fn no_echo_after_set() {
 #[tokio::test(flavor = "multi_thread")]
 async fn log_has_no_clipboard_text() {
     let (a, b, mut agent_a, mut agent_b) = linked().await;
-    let secret = "zq-deskhop-distinctive-7731";
+    let secret = "zq-mouseflock-distinctive-7731";
     agent_a.copy(secret);
     settle().await;
     cross_to_b(&mut agent_a, &mut agent_b).await;
@@ -1308,7 +1309,7 @@ async fn log_has_no_clipboard_text() {
         "{lines:#?}"
     );
     for line in &lines {
-        assert!(!line.contains("zq-deskhop"), "{line}");
+        assert!(!line.contains("zq-mouseflock"), "{line}");
     }
 }
 
@@ -1345,10 +1346,10 @@ async fn text_after_an_image_wins() {
     settle().await;
     b_takes_back(&mut a, &agent_b).await;
     assert_eq!(agent_a.set_image().await, png_like(64, 1));
-    agent_a.copy("deskhop text after");
+    agent_a.copy("mouseflock text after");
     settle().await;
     cross_to_b(&mut agent_a, &mut agent_b).await;
-    assert_eq!(agent_b.set_text().await, "deskhop text after");
+    assert_eq!(agent_b.set_text().await, "mouseflock text after");
     agent_b.no_set_for(Duration::from_millis(300)).await;
 }
 
@@ -1391,10 +1392,10 @@ async fn member_running_0_1_0_gets_text_but_no_image_offers() {
     agent_old.no_set_for(Duration::from_millis(500)).await;
     // The connection stayed up, and text still crosses.
     b_takes_back(&mut a, &agent_old).await;
-    agent_a.copy("deskhop text for old");
+    agent_a.copy("mouseflock text for old");
     settle().await;
     cross_to_b(&mut agent_a, &mut agent_old).await;
-    assert_eq!(agent_old.set_text().await, "deskhop text for old");
+    assert_eq!(agent_old.set_text().await, "mouseflock text for old");
     assert!(
         !a.seen.iter().any(|r| matches!(r, Report::PeerDown { .. })),
         "{:?}",
@@ -1487,7 +1488,7 @@ async fn a_member_that_understands_images_but_not_files_gets_no_file_offers() {
 #[tokio::test(flavor = "multi_thread")]
 async fn log_has_no_file_names() {
     let (a, b, mut agent_a, mut agent_b) = linked().await;
-    let body = b"zq-deskhop-file-bytes-5512".to_vec();
+    let body = b"zq-mouseflock-file-5512xyz".to_vec();
     agent_a.copy_files(&manifest(&[(
         "salary-zq7731.xlsx",
         false,
@@ -1508,7 +1509,7 @@ async fn log_has_no_file_names() {
     for line in &lines {
         assert!(!line.contains("salary"), "a file name in the log: {line}");
         assert!(
-            !line.contains("zq-deskhop"),
+            !line.contains("zq-mouseflock"),
             "file bytes in the log: {line}"
         );
     }
@@ -1519,7 +1520,7 @@ async fn log_has_no_image_bytes() {
     let (a, b, mut agent_a, mut agent_b) = linked().await;
     // Bytes that would show up in a log if any were written there.
     let mut png = png_like(256, b'q');
-    png[8..32].copy_from_slice(b"zq-deskhop-image-7731xyz");
+    png[8..32].copy_from_slice(b"zq-mouseflock-image-7731");
     agent_a.copy_image(&png);
     settle().await;
     cross_to_b(&mut agent_a, &mut agent_b).await;
@@ -1532,7 +1533,7 @@ async fn log_has_no_image_bytes() {
         "{lines:#?}"
     );
     for line in &lines {
-        assert!(!line.contains("zq-deskhop"), "{line}");
+        assert!(!line.contains("zq-mouseflock"), "{line}");
         assert!(!line.contains("qqqq"), "{line}");
     }
 }
@@ -1642,10 +1643,10 @@ async fn inactive_winlogon_agent_lost_changes_nothing() {
 async fn arrival_at_a_locked_machine_sets_clipboard_via_session_agent() {
     let (_a, b, mut agent_a, mut agent_b) = linked().await;
     let mut secure_b = secure_desktop(&b, "B1", CaptureMode::PassAll).await;
-    agent_a.copy("deskhop copy for a locked B");
+    agent_a.copy("mouseflock copy for a locked B");
     settle().await;
     cross_to_b(&mut agent_a, &mut agent_b).await;
-    assert_eq!(agent_b.set_text().await, "deskhop copy for a locked B");
+    assert_eq!(agent_b.set_text().await, "mouseflock copy for a locked B");
     // The cursor entered B's secure desktop; no clipboard went there.
     secure_b
         .expect("the warp onto B's secure desktop", |c| {

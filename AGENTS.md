@@ -1,4 +1,4 @@
-# DeskHop
+# MouseFlock
 
 Software KVM for Windows. One keyboard and mouse across several PCs over the LAN. Zero configuration is the product; the engine is table stakes.
 
@@ -15,10 +15,10 @@ Read `docs/design-brief.md` once. Architectural decisions live in `docs/adr/` an
 
 Every machine runs the same install:
 
-- `deskhop-service.exe` — Windows service, SYSTEM, session 0. Owns transport, pairing keys, managed configuration. Spawns agents via `WTSQueryUserToken` + `CreateProcessAsUser`.
-- `deskhop-agent.exe --session --pipe <name>` — user desktop, as the logged-on user, with UI access (ADR 0008) so it reaches elevated windows. Low-level hooks, Raw Input, `SendInput`, clipboard: text, images, and files by copy and paste (bytes pulled on paste; the service never opens a file).
-- `deskhop-agent.exe --winlogon --pipe <name>` — secure desktop, as SYSTEM with privileges removed, whether or not anyone is logged on. UAC prompts, lock and logon screens. No clipboard.
-- `DeskHop.exe` — Tauri UI. Optional. Nothing changes when it is closed.
+- `mouseflock-service.exe` — Windows service, SYSTEM, session 0. Owns transport, pairing keys, managed configuration. Spawns agents via `WTSQueryUserToken` + `CreateProcessAsUser`.
+- `mouseflock-agent.exe --session --pipe <name>` — user desktop, as the logged-on user, with UI access (ADR 0008) so it reaches elevated windows. Low-level hooks, Raw Input, `SendInput`, clipboard: text, images, and files by copy and paste (bytes pulled on paste; the service never opens a file).
+- `mouseflock-agent.exe --winlogon --pipe <name>` — secure desktop, as SYSTEM with privileges removed, whether or not anyone is logged on. UAC prompts, lock and logon screens. No clipboard.
+- `MouseFlock.exe` — Tauri UI. Optional. Nothing changes when it is closed.
 
 Service, agents, and UI talk over named pipes using the `ipc` crate.
 
@@ -38,8 +38,8 @@ crates/
   win32-session/    sessions, tokens, launching agents, pipe ACLs, SendSAS   ← unsafe allowed (ADR 0006)
   win32-shell/      the UI's Win32 calls: pipe server session check          ← unsafe allowed (ADR 0007)
 bin/
-  service/          deskhop-service.exe
-  agent/            deskhop-agent.exe
+  service/          mouseflock-service.exe
+  agent/            mouseflock-agent.exe
 apps/desktop/       Tauri 2 app (src-tauri + src)
 installer/          WiX
 docs/               design-brief.md, adr/, protocol.md, threat-model.md
@@ -69,11 +69,11 @@ cargo test --workspace                 # on Windows
 cargo test -p proto -p model -p engine -p policy -p pairing -p ipc   # on Linux CI
 cargo clippy --workspace -- -D warnings
 cargo archcheck                        # dependency and unsafe rules
-cargo build -p deskhop-agent; cargo run -p deskhop-service -- --console   # dev loop: pair, cross, type `help`
+cargo build -p mouseflock-agent; cargo run -p mouseflock-service -- --console   # dev loop: pair, cross, type `help`
 tools\dev\service.ps1 install|start|status|log|stop|uninstall             # registered service; elevated shell, run by the user
 installer\build.ps1 -Arch x64|arm64                                        # the MSI and the setup program, in installer\out
 installer\test.ps1 -Msi <msi> -UpgradeMsi <msi> -Setup <exe>               # install, upgrade, uninstall; elevated shell, run by the user
-cargo check -p transport -p win32-input -p win32-session -p win32-shell -p deskhop-agent -p deskhop-service -p deskhop-desktop --target aarch64-pc-windows-msvc
+cargo check -p transport -p win32-input -p win32-session -p win32-shell -p mouseflock-agent -p mouseflock-service -p mouseflock-desktop --target aarch64-pc-windows-msvc
 cd apps/desktop && npm run tauri dev    # dev build trusts a console-mode service in this session
 cd apps/desktop && npm test             # React tests
 ```

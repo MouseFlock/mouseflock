@@ -3,7 +3,7 @@
 import { useState } from "react";
 import type { Notice } from "./bridge";
 import { side } from "./text";
-import { useBridge, useNow, useSubscription } from "./useDeskhop";
+import { useBridge, useNow, useSubscription } from "./useMouseFlock";
 
 type Learned = Extract<Notice, { kind: "learned" }>;
 

@@ -35,7 +35,7 @@ use crate::{Captured, InjectError, WarpError, inject, now, screen};
 static RUNNING: AtomicBool = AtomicBool::new(false);
 /// The current [`CaptureMode`], read by the hooks.
 static MODE: AtomicU8 = AtomicU8::new(PASS_ALL);
-/// Whether the last move the mouse hook saw, other than DeskHop's own, was
+/// Whether the last move the mouse hook saw, other than MouseFlock's own, was
 /// injected (design D4).
 static LAST_MOVE_INJECTED: AtomicBool = AtomicBool::new(false);
 
@@ -106,10 +106,10 @@ pub fn start(options: Options) -> Result<(Capture, Receiver<Captured>), StartErr
     let (tx, rx) = mpsc::channel();
     capture
         .workers
-        .push(Worker::spawn("deskhop-input", input_thread, tx.clone())?);
+        .push(Worker::spawn("mouseflock-input", input_thread, tx.clone())?);
     let report_desktop = options.report_input_desktop;
     capture.workers.push(Worker::spawn(
-        "deskhop-screen",
+        "mouseflock-screen",
         move |tx, ready| screen::thread(tx, ready, report_desktop),
         tx,
     )?);
@@ -128,7 +128,7 @@ impl Capture {
         MODE.store(m, Ordering::Release);
     }
 
-    /// Injects `action` into this machine's OS, tagged as DeskHop's own.
+    /// Injects `action` into this machine's OS, tagged as MouseFlock's own.
     pub fn inject(&self, action: InputAction) -> Result<(), InjectError> {
         inject::send(action)
     }
@@ -233,7 +233,7 @@ pub(crate) fn hidden_window(class: PCWSTR) -> windows::core::Result<HWND> {
         CreateWindowExW(
             WS_EX_TOOLWINDOW | WINDOW_EX_STYLE(0),
             class,
-            windows::core::w!("DeskHop"),
+            windows::core::w!("MouseFlock"),
             WINDOW_STYLE(0),
             0,
             0,

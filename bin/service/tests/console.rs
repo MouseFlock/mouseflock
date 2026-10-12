@@ -4,8 +4,8 @@
 //! sits next to the service:
 //!
 //! ```text
-//! cargo build -p deskhop-agent
-//! cargo test -p deskhop-service -- --ignored --test-threads=1
+//! cargo build -p mouseflock-agent
+//! cargo test -p mouseflock-service -- --ignored --test-threads=1
 //! ```
 //!
 //! The agent only ever passes input through here: nothing asks it to
@@ -18,14 +18,14 @@ use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
 use std::sync::mpsc::{Receiver, channel};
 use std::time::{Duration, Instant};
 
-const SERVICE: &str = env!("CARGO_BIN_EXE_deskhop-service");
+const SERVICE: &str = env!("CARGO_BIN_EXE_mouseflock-service");
 const WAIT: Duration = Duration::from_secs(10);
 
 fn agent_exe() -> PathBuf {
-    let path = PathBuf::from(SERVICE).with_file_name("deskhop-agent.exe");
+    let path = PathBuf::from(SERVICE).with_file_name("mouseflock-agent.exe");
     assert!(
         path.exists(),
-        "{} is missing; run `cargo build -p deskhop-agent` first",
+        "{} is missing; run `cargo build -p mouseflock-agent` first",
         path.display()
     );
     path
@@ -73,7 +73,7 @@ impl Console {
     fn start(tag: &str) -> Self {
         agent_exe();
         let dir =
-            std::env::temp_dir().join(format!("deskhop-console-{}-{tag}", std::process::id()));
+            std::env::temp_dir().join(format!("mouseflock-console-{}-{tag}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let mut child = Command::new(SERVICE)
             .args(["--console", "--port", "0", "--data"])
@@ -218,10 +218,12 @@ fn ui_client_sees_status_and_opens_pairing() {
     use tokio::net::windows::named_pipe::ClientOptions;
 
     let mut console = Console::start("ui");
-    console.logged(r"serving UIs on \\.\pipe\deskhop-ui", WAIT);
+    console.logged(r"serving UIs on \\.\pipe\mouseflock-ui", WAIT);
     let runtime = tokio::runtime::Runtime::new().unwrap();
     runtime.block_on(async {
-        let pipe = ClientOptions::new().open(r"\\.\pipe\deskhop-ui").unwrap();
+        let pipe = ClientOptions::new()
+            .open(r"\\.\pipe\mouseflock-ui")
+            .unwrap();
         let (to_service, mut events) = UiEnd::connect(pipe).await.unwrap();
         let first = tokio::time::timeout(WAIT, events.recv()).await.unwrap();
         assert!(matches!(first, Some(UiEvent::Status(_))), "{first:?}");

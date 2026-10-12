@@ -46,7 +46,7 @@ On arrival the receiving agent places an OLE data object, not static data:
 - The data object lives on a **thread of its own**, an STA that calls `OleInitialize` and pumps messages. Explorer's calls, including each `IStream::Read`, arrive on the thread that placed the object, and a `Read` blocks it while bytes are on their way (found in the task 1 spike). On its own thread that wait never holds up the clipboard thread, so copies made during a long paste are still reported.
 - The agent builds an `IDataObject` offering:
   - `CFSTR_FILEDESCRIPTORW` — a `FILEGROUPDESCRIPTORW` from the manifest: one `FILEDESCRIPTOR` per entry, with the relative name, the directory attribute, and the size. Windows uses this to create the tree and show progress.
-  - `CFSTR_FILECONTENTS` — per index, as `TYMED_ISTREAM`. Each file's `IStream` is a DeskHop object whose `Read` pulls the next bytes of that file from the service, blocking until they arrive, and reports end at the file's length.
+  - `CFSTR_FILECONTENTS` — per index, as `TYMED_ISTREAM`. Each file's `IStream` is a MouseFlock object whose `Read` pulls the next bytes of that file from the service, blocking until they arrive, and reports end at the file's length.
 - `OleSetClipboard(data_object)`. When the user pastes, Explorer reads the descriptor, then for each file opens its `CFSTR_FILECONTENTS` `IStream` and reads it to a new file under the paste target. Explorer shows its own copy dialog and handles name collisions.
 
 The `IStream` is where a paste reaches back to the owner (D4). It is a small, self-contained COM object; the `unsafe` and COM live only in `win32-clipboard`, the one clipboard crate that allows them.

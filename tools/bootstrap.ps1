@@ -1,4 +1,4 @@
-# Installs the DeskHop development toolchain on Windows 10 22H2 / 11.
+# Installs the MouseFlock development toolchain on Windows 10 22H2 / 11.
 # Run from an elevated terminal (Build Tools needs it):
 #   tools\bootstrap.cmd
 # Safe to re-run; installed packages are skipped.

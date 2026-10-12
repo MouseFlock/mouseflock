@@ -2,12 +2,12 @@
 
 ## Purpose
 
-Lets DeskHop machines find each other on the LAN with no addresses typed or configured: members are found by mDNS, and a joining machine finds the inviter from the pairing code, with or without multicast.
+Lets MouseFlock machines find each other on the LAN with no addresses typed or configured: members are found by mDNS, and a joining machine finds the inviter from the pairing code, with or without multicast.
 
 ## Requirements
 
 ### Requirement: Advertisement
-A running machine SHALL advertise one mDNS service of type `_deskhop._udp.local.`. The instance name SHALL be the first 16 bytes of its peer identity in lowercase hexadecimal, and the port SHALL be the one it listens on. The TXT record SHALL hold `id=` followed by the full 32-byte peer identity in lowercase hexadecimal, and SHALL hold `pair=1` exactly while pairing mode is open. The machine SHALL update the advertisement when pairing mode opens or closes.
+A running machine SHALL advertise one mDNS service of type `_mouseflock._udp.local.`. The instance name SHALL be the first 16 bytes of its peer identity in lowercase hexadecimal, and the port SHALL be the one it listens on. The TXT record SHALL hold `id=` followed by the full 32-byte peer identity in lowercase hexadecimal, and SHALL hold `pair=1` exactly while pairing mode is open. The machine SHALL update the advertisement when pairing mode opens or closes.
 
 #### Scenario: Advertised identity
 - **WHEN** a machine with peer identity `ab12…` (32 bytes) is running
@@ -18,7 +18,7 @@ A running machine SHALL advertise one mDNS service of type `_deskhop._udp.local.
 - **THEN** the advertisement's TXT gains `pair=1`, and loses it when pairing mode closes
 
 ### Requirement: Finding members
-A machine SHALL browse for `_deskhop._udp.local.` and treat each resolved advertisement as a sighting of the identity in its `id=` entry, at the advertised addresses and port. Sightings with a missing or malformed `id=`, and sightings of its own identity, SHALL be ignored. A sighting of a member that is not up SHALL lead to a dial, as the peer-transport capability specifies. A sighting SHALL never be trusted on its own: the dial pins the identity.
+A machine SHALL browse for `_mouseflock._udp.local.` and treat each resolved advertisement as a sighting of the identity in its `id=` entry, at the advertised addresses and port. Sightings with a missing or malformed `id=`, and sightings of its own identity, SHALL be ignored. A sighting of a member that is not up SHALL lead to a dial, as the peer-transport capability specifies. A sighting SHALL never be trusted on its own: the dial pins the identity.
 
 #### Scenario: Member found
 - **WHEN** member B's advertisement appears

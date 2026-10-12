@@ -32,14 +32,14 @@ pub const MAX_FILE: u64 = 1 << 20;
 /// The registered service's data folder.
 pub fn service_dir() -> PathBuf {
     let base = std::env::var_os("ProgramData").unwrap_or_else(|| r"C:\ProgramData".into());
-    Path::new(&base).join("DeskHop")
+    Path::new(&base).join("MouseFlock")
 }
 
 /// Console mode's default data folder, under the user's local application
 /// data.
 pub fn console_dir() -> Option<PathBuf> {
     let base = std::env::var_os("LOCALAPPDATA")?;
-    Some(Path::new(&base).join("DeskHop").join("console"))
+    Some(Path::new(&base).join("MouseFlock").join("console"))
 }
 
 /// Makes the data folder ready before anything in it is read: in service
@@ -414,7 +414,7 @@ mod tests {
         static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
         let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let dir =
-            std::env::temp_dir().join(format!("deskhop-store-{}-{tag}-{n}", std::process::id()));
+            std::env::temp_dir().join(format!("mouseflock-store-{}-{tag}-{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
@@ -477,7 +477,7 @@ mod tests {
         let log = Log::memory();
         std::fs::write(dir.join(LAYOUTS), b"{not json").unwrap();
         std::fs::write(dir.join(ADDRESSES), br#"{"version":9,"peers":{}}"#).unwrap();
-        std::fs::write(dir.join(TRUST_STORE), b"DHTS\x09").unwrap();
+        std::fs::write(dir.join(TRUST_STORE), b"MFTS\x09").unwrap();
         let stored = load(&dir, machine_name(Some("A".into())), &log).unwrap();
         assert!(stored.layouts.is_empty() && stored.addresses.is_empty());
         assert_eq!(stored.machine.desk().members().count(), 0);

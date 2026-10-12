@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Lets files copied on one DeskHop machine be pasted on another. A file copy follows the cursor under the clipboard's announce, newest-copy and request model, but its bytes move only when the user pastes, pulled file by file, so nothing large moves unless it is wanted.
+Lets files copied on one MouseFlock machine be pasted on another. A file copy follows the cursor under the clipboard's announce, newest-copy and request model, but its bytes move only when the user pastes, pulled file by file, so nothing large moves unless it is wanted.
 
 ## ADDED Requirements
 

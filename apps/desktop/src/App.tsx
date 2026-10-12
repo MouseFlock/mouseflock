@@ -2,7 +2,7 @@
 // logic here. One frontend serves both windows, picked by window label.
 import { MainWindow } from "./MainWindow";
 import { UndoPopup } from "./UndoPopup";
-import { useBridge } from "./useDeskhop";
+import { useBridge } from "./useMouseFlock";
 
 export default function App() {
   return useBridge().windowLabel() === "undo" ? <UndoPopup /> : <MainWindow />;

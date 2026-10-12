@@ -1,12 +1,12 @@
 <!--
-  What installing DeskHop does to a PC (spec: installer; add-installer design
+  What installing MouseFlock does to a PC (spec: installer; add-installer design
   D3-D8). One per-machine package per architecture.
 -->
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
      xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util"
      xmlns:fw="http://wixtoolset.org/schemas/v4/wxs/firewall">
-  <Package Name="DeskHop"
-           Manufacturer="DeskHop"
+  <Package Name="MouseFlock"
+           Manufacturer="MouseFlock"
            Version="$(ProductVersion)"
            UpgradeCode="{057CBB71-0D2E-4746-B0C4-E2510478D092}"
            Scope="perMachine"
@@ -17,17 +17,17 @@
     <!-- D3: a newer version replaces the old one in one transaction; an older one is refused. -->
     <MajorUpgrade AllowSameVersionUpgrades="yes"
                   Schedule="afterInstallInitialize"
-                  DowngradeErrorMessage="A newer version of DeskHop is already installed." />
+                  DowngradeErrorMessage="A newer version of MouseFlock is already installed." />
     <MediaTemplate EmbedCab="yes" />
 
-    <Icon Id="DeskHop.ico" SourceFile="$(Icon)" />
-    <Property Id="ARPPRODUCTICON" Value="DeskHop.ico" />
+    <Icon Id="MouseFlock.ico" SourceFile="$(Icon)" />
+    <Property Id="ARPPRODUCTICON" Value="MouseFlock.ico" />
     <Property Id="ARPNOMODIFY" Value="1" />
-    <Property Id="ARPURLINFOABOUT" Value="https://github.com/deskhop/DeskHop" />
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/mouseflock/mouseflock" />
 
     <!--
       D3, D11: Windows checks for files in use at InstallValidate, before any
-      of DeskHop's own steps can run, and finds the agents and tray apps
+      of MouseFlock's own steps can run, and finds the agents and tray apps
       holding their programs. Run silently, as the setup program runs this
       package, Restart Manager closes them; force (1) ends any that do not
       answer. Run directly with a UI, Windows may warn of a reboot instead,
@@ -38,17 +38,17 @@
     <Property Id="MSIRMSHUTDOWN" Value="1" />
 
     <!-- D8: the development registration and the package exclude each other. -->
-    <Property Id="DESKHOP_SERVICE_IMAGE">
-      <RegistrySearch Root="HKLM" Key="SYSTEM\CurrentControlSet\Services\DeskHop" Name="ImagePath" Type="raw" Bitness="always64" />
+    <Property Id="MOUSEFLOCK_SERVICE_IMAGE">
+      <RegistrySearch Root="HKLM" Key="SYSTEM\CurrentControlSet\Services\MouseFlock" Name="ImagePath" Type="raw" Bitness="always64" />
     </Property>
-    <Launch Condition="Installed OR WIX_UPGRADE_DETECTED OR NOT DESKHOP_SERVICE_IMAGE"
-            Message="DeskHop's development service is registered. Run tools\dev\service.ps1 uninstall from an elevated PowerShell first." />
+    <Launch Condition="Installed OR WIX_UPGRADE_DETECTED OR NOT MOUSEFLOCK_SERVICE_IMAGE"
+            Message="MouseFlock's development service is registered. Run tools\dev\service.ps1 uninstall from an elevated PowerShell first." />
 
     <StandardDirectory Id="ProgramFiles64Folder">
-      <Directory Id="INSTALLFOLDER" Name="DeskHop" />
+      <Directory Id="INSTALLFOLDER" Name="MouseFlock" />
     </StandardDirectory>
 
-    <Feature Id="DeskHop" Title="DeskHop" Level="1">
+    <Feature Id="MouseFlock" Title="MouseFlock" Level="1">
       <ComponentGroupRef Id="Programs" />
       <ComponentGroupRef Id="Machine" />
     </Feature>
@@ -57,20 +57,20 @@
     <CustomActionRef Id="RemoveData" />
 
     <!-- D7: progress, then a finish page offering to start the tray app. -->
-    <UIRef Id="DeskHopUI" />
+    <UIRef Id="MouseFlockUI" />
   </Package>
 
   <Fragment>
     <ComponentGroup Id="Programs" Directory="INSTALLFOLDER">
       <!-- D3: the service, its failure actions, and its firewall rules. -->
       <Component Id="Service">
-        <File Id="ServiceExe" Source="$(BinDir)\deskhop-service.exe" KeyPath="yes">
-          <fw:FirewallException Id="FirewallQuic" Name="DeskHop (UDP 47391)" Protocol="udp" Port="47391" Scope="any" Profile="all" Description="DeskHop's encrypted link to the PCs it is paired with." />
-          <fw:FirewallException Id="FirewallMdns" Name="DeskHop (mDNS)" Protocol="udp" Port="5353" Scope="any" Profile="all" Description="DeskHop finding the PCs it is paired with on this network." />
+        <File Id="ServiceExe" Source="$(BinDir)\mouseflock-service.exe" KeyPath="yes">
+          <fw:FirewallException Id="FirewallQuic" Name="MouseFlock (UDP 47391)" Protocol="udp" Port="47391" Scope="any" Profile="all" Description="MouseFlock's encrypted link to the PCs it is paired with." />
+          <fw:FirewallException Id="FirewallMdns" Name="MouseFlock (mDNS)" Protocol="udp" Port="5353" Scope="any" Profile="all" Description="MouseFlock finding the PCs it is paired with on this network." />
         </File>
         <ServiceInstall Id="Service"
-                        Name="DeskHop"
-                        DisplayName="DeskHop"
+                        Name="MouseFlock"
+                        DisplayName="MouseFlock"
                         Description="Shares one keyboard and mouse across your PCs."
                         Type="ownProcess"
                         Start="auto"
@@ -83,15 +83,15 @@
                               RestartServiceDelayInSeconds="5"
                               ResetPeriodInDays="1" />
         </ServiceInstall>
-        <ServiceControl Id="Service" Name="DeskHop" Start="install" Stop="both" Remove="uninstall" Wait="yes" />
+        <ServiceControl Id="Service" Name="MouseFlock" Start="install" Stop="both" Remove="uninstall" Wait="yes" />
       </Component>
       <Component Id="Agent">
-        <File Id="AgentExe" Source="$(BinDir)\deskhop-agent.exe" KeyPath="yes" />
+        <File Id="AgentExe" Source="$(BinDir)\mouseflock-agent.exe" KeyPath="yes" />
       </Component>
       <!-- D3: the tray app, with a Start menu shortcut for all users. -->
       <Component Id="TrayApp">
-        <File Id="DeskHopExe" Source="$(BinDir)\DeskHop.exe" KeyPath="yes">
-          <Shortcut Id="DeskHop" Directory="ProgramMenuFolder" Name="DeskHop" Description="Share one keyboard and mouse across your PCs." WorkingDirectory="INSTALLFOLDER" Advertise="no" />
+        <File Id="MouseFlockExe" Source="$(BinDir)\MouseFlock.exe" KeyPath="yes">
+          <Shortcut Id="MouseFlock" Directory="ProgramMenuFolder" Name="MouseFlock" Description="Share one keyboard and mouse across your PCs." WorkingDirectory="INSTALLFOLDER" Advertise="no" />
         </File>
       </Component>
     </ComponentGroup>
@@ -99,17 +99,17 @@
 
   <Fragment>
     <ComponentGroup Id="Machine">
-      <!-- D3, D8: where DeskHop is installed, for the development script. -->
+      <!-- D3, D8: where MouseFlock is installed, for the development script. -->
       <Component Id="Markers" Directory="INSTALLFOLDER">
-        <RegistryValue Root="HKLM" Key="SOFTWARE\DeskHop" Name="InstallFolder" Type="string" Value="[INSTALLFOLDER]" KeyPath="yes" />
-        <RemoveRegistryKey Root="HKLM" Key="SOFTWARE\DeskHop" Action="removeOnUninstall" />      </Component>
+        <RegistryValue Root="HKLM" Key="SOFTWARE\MouseFlock" Name="InstallFolder" Type="string" Value="[INSTALLFOLDER]" KeyPath="yes" />
+        <RemoveRegistryKey Root="HKLM" Key="SOFTWARE\MouseFlock" Action="removeOnUninstall" />      </Component>
 
       <!--
         D5: set the secure attention policy only if it is unset, and remove it
         only if this package set it. SasSet marks that, so an upgrade keeps it.
       -->
       <Component Id="SasPolicy" Directory="INSTALLFOLDER" Condition="NOT SAS_EXISTING OR SAS_OURS">
-        <RegistryValue Root="HKLM" Key="SOFTWARE\DeskHop" Name="SasSet" Type="integer" Value="1" KeyPath="yes" />
+        <RegistryValue Root="HKLM" Key="SOFTWARE\MouseFlock" Name="SasSet" Type="integer" Value="1" KeyPath="yes" />
         <RegistryValue Root="HKLM" Key="SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" Name="SoftwareSASGeneration" Type="integer" Value="1" />
       </Component>
     </ComponentGroup>
@@ -118,13 +118,13 @@
       <RegistrySearch Root="HKLM" Key="SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" Name="SoftwareSASGeneration" Type="raw" Bitness="always64" />
     </Property>
     <Property Id="SAS_OURS">
-      <RegistrySearch Root="HKLM" Key="SOFTWARE\DeskHop" Name="SasSet" Type="raw" Bitness="always64" />
+      <RegistrySearch Root="HKLM" Key="SOFTWARE\MouseFlock" Name="SasSet" Type="raw" Bitness="always64" />
     </Property>
   </Fragment>
 
   <Fragment>
     <!-- D3: the tray app hides on WM_CLOSE, so it is ended instead. Its state lives in the service. -->
-    <util:CloseApplication Id="CloseTrayApp" Target="DeskHop.exe" CloseMessage="no" TerminateProcess="1" Timeout="2" RebootPrompt="no" />
+    <util:CloseApplication Id="CloseTrayApp" Target="MouseFlock.exe" CloseMessage="no" TerminateProcess="1" Timeout="2" RebootPrompt="no" />
 
     <!--
       D4: remove the SYSTEM-only data folder on uninstall, but not on an

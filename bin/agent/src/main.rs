@@ -1,4 +1,4 @@
-//! `deskhop-agent.exe`: input and clipboard on one desktop.
+//! `mouseflock-agent.exe`: input and clipboard on one desktop.
 //!
 //! `--session --pipe <name>` runs on the user desktop, and
 //! `--winlogon --pipe <name>` on the secure desktop for UAC prompts, the
@@ -77,8 +77,8 @@ fn main() -> ExitCode {
         Some(Mode::Trace { withhold }) => trace(withhold),
         None => {
             eprintln!(
-                "usage: deskhop-agent.exe --session|--winlogon --pipe <name>\n       \
-                 deskhop-agent.exe --trace [--withhold mouse|all <1..{MAX_WITHHOLD_SECS}>]"
+                "usage: mouseflock-agent.exe --session|--winlogon --pipe <name>\n       \
+                 mouseflock-agent.exe --trace [--withhold mouse|all <1..{MAX_WITHHOLD_SECS}>]"
             );
             ExitCode::from(2)
         }
@@ -93,7 +93,7 @@ fn trace(withhold: Option<(CaptureMode, u64)>) -> ExitCode {
     let (capture, rx) = match win32_input::start(options) {
         Ok(v) => v,
         Err(e) => {
-            eprintln!("deskhop-agent: {e}");
+            eprintln!("mouseflock-agent: {e}");
             return ExitCode::FAILURE;
         }
     };

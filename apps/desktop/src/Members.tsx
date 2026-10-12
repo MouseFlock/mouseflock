@@ -1,7 +1,7 @@
 // The desk's other machines, by name, with Remove behind a confirmation.
 import { useState } from "react";
 import type { Member } from "./bridge";
-import { useBridge } from "./useDeskhop";
+import { useBridge } from "./useMouseFlock";
 
 export function Members({
   members,

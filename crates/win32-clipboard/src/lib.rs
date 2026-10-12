@@ -9,7 +9,7 @@
 //!   limits.
 //! - [`files`]: files offered for paste without their bytes, as an OLE data
 //!   object whose per-file streams read from a source only on paste.
-//! - [`start`]: the `deskhop-clipboard` thread, which reports each settled
+//! - [`start`]: the `mouseflock-clipboard` thread, which reports each settled
 //!   copy and sets text without reporting it back.
 
 pub mod files;

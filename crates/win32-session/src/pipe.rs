@@ -151,7 +151,7 @@ mod tests {
 
     fn name(tag: &str) -> String {
         format!(
-            r"\\.\pipe\deskhop-test-session-{}-{tag}",
+            r"\\.\pipe\mouseflock-test-session-{}-{tag}",
             std::process::id()
         )
     }

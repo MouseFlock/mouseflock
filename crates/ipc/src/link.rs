@@ -56,9 +56,9 @@ pub const MAX_HELD: usize = 10_000;
 /// it, and the service end checks the messages that only one kind may send.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AgentRole {
-    /// `deskhop-agent --session`: the user's desktop, with the clipboard.
+    /// `mouseflock-agent --session`: the user's desktop, with the clipboard.
     Session,
-    /// `deskhop-agent --winlogon`: the secure desktop, without a clipboard.
+    /// `mouseflock-agent --winlogon`: the secure desktop, without a clipboard.
     Winlogon,
 }
 

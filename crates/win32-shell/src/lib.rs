@@ -1,7 +1,7 @@
 //! The UI's Win32 calls.
 //!
 //! One of four crates where `unsafe` is allowed (ADR 0007). Every `unsafe`
-//! block carries a `// SAFETY:` comment. Linked only by `deskhop-desktop`,
+//! block carries a `// SAFETY:` comment. Linked only by `mouseflock-desktop`,
 //! which stays `#![forbid(unsafe_code)]`. Nothing here touches input or
 //! needs privileges.
 //!
@@ -45,7 +45,7 @@ mod tests {
     /// case a release UI refuses.
     #[tokio::test]
     async fn server_session_matches_own() {
-        let name = format!(r"\\.\pipe\deskhop-test-shell-{}", std::process::id());
+        let name = format!(r"\\.\pipe\mouseflock-test-shell-{}", std::process::id());
         let server = ServerOptions::new()
             .first_pipe_instance(true)
             .reject_remote_clients(true)

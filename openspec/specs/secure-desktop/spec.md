@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Keeps DeskHop working when Windows shows its secure desktop: UAC prompts, the lock screen and the logon screen. It decides which of this machine's agents carries input at any moment, so the cursor can cross onto, and type into, whatever the user would see at the keyboard.
+Keeps MouseFlock working when Windows shows its secure desktop: UAC prompts, the lock screen and the logon screen. It decides which of this machine's agents carries input at any moment, so the cursor can cross onto, and type into, whatever the user would see at the keyboard.
 
 ## Requirements
 

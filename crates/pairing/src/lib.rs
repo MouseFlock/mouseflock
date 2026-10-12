@@ -41,7 +41,7 @@ impl fmt::Display for FileError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Self::Length => "file has the wrong length",
-            Self::Magic => "file is not a DeskHop file of this kind",
+            Self::Magic => "file is not a MouseFlock file of this kind",
             Self::Version => "file format version is not supported",
             Self::Record => "file contains an invalid record",
         })

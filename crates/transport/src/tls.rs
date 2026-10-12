@@ -19,13 +19,13 @@ use rustls::{
 };
 
 /// ALPN of a member connection.
-pub const ALPN_MEMBER: &[u8] = b"deskhop/1";
+pub const ALPN_MEMBER: &[u8] = b"mouseflock/1";
 
 /// ALPN of a pairing connection.
-pub const ALPN_PAIR: &[u8] = b"deskhop-pair/1";
+pub const ALPN_PAIR: &[u8] = b"mouseflock-pair/1";
 
 /// The server name every dialer sends. Verifiers ignore it.
-pub const SERVER_NAME: &str = "deskhop";
+pub const SERVER_NAME: &str = "mouseflock";
 
 /// DER of an Ed25519 SubjectPublicKeyInfo up to the key (RFC 8410).
 const ED25519_SPKI_PREFIX: [u8; 12] = [

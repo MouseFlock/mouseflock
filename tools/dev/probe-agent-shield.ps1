@@ -5,7 +5,7 @@ Checks that the session agent is shielded from the user's own programs
 
 .DESCRIPTION
 Run from a NORMAL (unelevated) PowerShell, as the logged-on user, while
-DeskHop is running. It finds the session agent (deskhop-agent.exe in this
+MouseFlock is running. It finds the session agent (mouseflock-agent.exe in this
 session) and tries to open its process for the access an attacker would use
 to hijack a UI-access process: writing its memory, creating a thread in it,
 and rewriting its security. With the shield in place, Windows denies each of
@@ -44,7 +44,7 @@ if ($me.Owner.IsWellKnown([Security.Principal.WellKnownSidType]::LocalSystemSid)
 # not.
 $session = (Get-Process -Id $PID).SessionId
 $me = [Security.Principal.WindowsIdentity]::GetCurrent().Name
-$proc = Get-CimInstance Win32_Process -Filter "Name='deskhop-agent.exe'" -ErrorAction SilentlyContinue |
+$proc = Get-CimInstance Win32_Process -Filter "Name='mouseflock-agent.exe'" -ErrorAction SilentlyContinue |
     Where-Object { $_.SessionId -eq $session } |
     Where-Object {
         $o = Invoke-CimMethod -InputObject $_ -MethodName GetOwner
@@ -52,7 +52,7 @@ $proc = Get-CimInstance Win32_Process -Filter "Name='deskhop-agent.exe'" -ErrorA
     } |
     Select-Object -First 1
 if (-not $proc) {
-    Write-Host "No session agent (deskhop-agent.exe running as $me) found in session $session. Is DeskHop running and are you logged on?"
+    Write-Host "No session agent (mouseflock-agent.exe running as $me) found in session $session. Is MouseFlock running and are you logged on?"
     exit 1
 }
 $agent = [pscustomobject]@{ Id = [int]$proc.ProcessId }

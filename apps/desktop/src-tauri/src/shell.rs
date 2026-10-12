@@ -56,7 +56,7 @@ impl Shell {
     pub fn show_main(&self, route: Option<&'static str>) {
         if let Some(r) = route {
             *self.route.lock().unwrap_or_else(PoisonError::into_inner) = Some(r);
-            let _ = self.app.emit_to(MAIN, "deskhop://navigate", r);
+            let _ = self.app.emit_to(MAIN, "mouseflock://navigate", r);
         }
         if let Some(w) = self.app.get_webview_window(MAIN) {
             let _ = w.unminimize();
@@ -84,7 +84,7 @@ impl Shell {
         if let Some((x, y)) = self.popup_corner(&w) {
             let _ = w.set_position(PhysicalPosition::new(x, y));
         }
-        let _ = self.app.emit_to(UNDO, "deskhop://undo", notice);
+        let _ = self.app.emit_to(UNDO, "mouseflock://undo", notice);
         let _ = w.show();
         let me = self.clone();
         tauri::async_runtime::spawn(async move {
@@ -156,7 +156,7 @@ struct ShellSink(Arc<Shell>);
 impl Sink for ShellSink {
     fn view(&self, view: &View) {
         let shell = &self.0;
-        let _ = shell.app.emit("deskhop://view", view);
+        let _ = shell.app.emit("mouseflock://view", view);
         if let Some(tray) = shell.app.tray_by_id(TRAY) {
             let _ = tray.set_tooltip(Some(tooltip(view)));
         }
@@ -169,7 +169,7 @@ impl Sink for ShellSink {
     }
 
     fn notice(&self, notice: &Notice) {
-        let _ = self.0.app.emit("deskhop://notice", notice);
+        let _ = self.0.app.emit("mouseflock://notice", notice);
         if let Notice::Learned { left_ms, .. } = notice {
             self.0.show_popup(notice, *left_ms, false);
         }
@@ -198,7 +198,7 @@ pub fn on_window_event(window: &Window, event: &WindowEvent) {
 }
 
 fn tray(app: &AppHandle, shell: &Arc<Shell>) -> tauri::Result<()> {
-    let open = MenuItem::with_id(app, "open", "Open DeskHop", true, None::<&str>)?;
+    let open = MenuItem::with_id(app, "open", "Open MouseFlock", true, None::<&str>)?;
     let add = MenuItem::with_id(app, "add", "Add a PC", true, None::<&str>)?;
     let autostart = CheckMenuItem::with_id(
         app,
@@ -220,7 +220,7 @@ fn tray(app: &AppHandle, shell: &Arc<Shell>) -> tauri::Result<()> {
     let on_menu = shell.clone();
     let on_click = shell.clone();
     let mut builder = TrayIconBuilder::with_id(TRAY)
-        .tooltip("DeskHop")
+        .tooltip("MouseFlock")
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_menu_event(move |app, event| match event.id().as_ref() {

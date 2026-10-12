@@ -31,7 +31,7 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
       # ring builds C code; for ARM64 it needs clang, which the runner has.
-      - run: cargo check -p transport -p win32-input -p win32-session -p win32-shell -p deskhop-agent -p deskhop-service -p deskhop-desktop --target aarch64-pc-windows-msvc
+      - run: cargo check -p transport -p win32-input -p win32-session -p win32-shell -p mouseflock-agent -p mouseflock-service -p mouseflock-desktop --target aarch64-pc-windows-msvc
 
   # Both packages, and an install, upgrade and uninstall of x64 (add-installer D9).
   installer:
@@ -62,18 +62,18 @@ jobs:
         shell: powershell
         run: >-
           installer\test.ps1
-          -Msi (Get-Item installer\out\DeskHop-*-x64.msi).FullName
-          -UpgradeMsi (Get-Item installer\out\DeskHop-*-x64-rebuild.msi).FullName
-          -Setup (Get-Item installer\out\DeskHop-Setup-*-x64.exe).FullName
+          -Msi (Get-Item installer\out\MouseFlock-*-x64.msi).FullName
+          -UpgradeMsi (Get-Item installer\out\MouseFlock-*-x64-rebuild.msi).FullName
+          -Setup (Get-Item installer\out\MouseFlock-Setup-*-x64.exe).FullName
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: installer
           path: |
-            installer/out/DeskHop-Setup-*-x64.exe
-            installer/out/DeskHop-Setup-*-arm64.exe
-            installer/out/DeskHop-*-x64.msi
-            installer/out/DeskHop-*-arm64.msi
+            installer/out/MouseFlock-Setup-*-x64.exe
+            installer/out/MouseFlock-Setup-*-arm64.exe
+            installer/out/MouseFlock-*-x64.msi
+            installer/out/MouseFlock-*-arm64.msi
             installer/out/*.log
           if-no-files-found: warn
 

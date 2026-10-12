@@ -11,7 +11,7 @@ use crate::message::{Direction, Fields, check, exactly};
 use crate::{EncodeError, ProtocolError, frame};
 
 /// The pipe the service serves UIs on.
-pub const PIPE_NAME: &str = r"\\.\pipe\deskhop-ui";
+pub const PIPE_NAME: &str = r"\\.\pipe\mouseflock-ui";
 
 pub const OPEN_PAIRING: u16 = 0x0030;
 pub const CLOSE_PAIRING: u16 = 0x0031;

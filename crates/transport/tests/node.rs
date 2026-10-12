@@ -340,7 +340,7 @@ async fn removal_reaches_the_removed_machine() {
     else {
         unreachable!()
     };
-    assert_eq!(&file[..5], b"DHTS\x01");
+    assert_eq!(&file[..5], b"MFTS\x01");
     // And A does not reconnect to it.
     a.none_for(Duration::from_millis(1_500), |e| *e == Event::PeerUp(idb))
         .await;

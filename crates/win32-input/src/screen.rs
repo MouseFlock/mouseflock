@@ -43,7 +43,7 @@ use crate::{Captured, desktop};
 const RECHECK_MS: u32 = 2000;
 const SCREEN_TIMER: usize = 1;
 const DESKTOP_TIMER: usize = 2;
-const CLASS: PCWSTR = w!("DeskHopScreen");
+const CLASS: PCWSTR = w!("MouseFlockScreen");
 
 /// What lies behind one monitor's identity, for diagnostics.
 #[derive(Debug, Clone, PartialEq, Eq)]

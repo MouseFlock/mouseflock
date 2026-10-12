@@ -212,10 +212,10 @@ mod tests {
     fn plain_arguments_are_not_quoted() {
         assert_eq!(
             command_line(
-                Path::new(r"C:\x\deskhop-agent.exe"),
-                &["--session", "--pipe", r"\\.\pipe\deskhop-agent-00ff"]
+                Path::new(r"C:\x\mouseflock-agent.exe"),
+                &["--session", "--pipe", r"\\.\pipe\mouseflock-agent-00ff"]
             ),
-            r"C:\x\deskhop-agent.exe --session --pipe \\.\pipe\deskhop-agent-00ff"
+            r"C:\x\mouseflock-agent.exe --session --pipe \\.\pipe\mouseflock-agent-00ff"
         );
     }
 
@@ -223,10 +223,10 @@ mod tests {
     fn spaces_quotes_and_trailing_backslashes() {
         assert_eq!(
             command_line(
-                Path::new(r"C:\Program Files\DeskHop Dev\a.exe"),
+                Path::new(r"C:\Program Files\MouseFlock Dev\a.exe"),
                 &["", r#"say "hi""#, r"dir\"]
             ),
-            r#""C:\Program Files\DeskHop Dev\a.exe" "" "say \"hi\"" dir\"#
+            r#""C:\Program Files\MouseFlock Dev\a.exe" "" "say \"hi\"" dir\"#
         );
         assert_eq!(command_line(Path::new("a"), &[r"x y\"]), r#"a "x y\\""#);
         assert_eq!(

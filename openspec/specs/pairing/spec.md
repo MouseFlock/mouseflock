@@ -7,7 +7,7 @@ Lets a user add a machine to their desk by typing a short digit code shown on an
 ## Requirements
 
 ### Requirement: Machine identity
-Each machine SHALL have one Ed25519 identity key, generated from the operating system's random number generator the first time it is needed and kept from then on. The machine's peer identity SHALL be the 32-byte Ed25519 public key. The identity SHALL be stored as a 37-byte identity file: the ASCII bytes `DHID`, a format version byte `1`, and the 32-byte private key seed. Reading an identity file that is not exactly this layout SHALL report an error and SHALL NOT generate a replacement key, because a new key would silently drop the machine from its desk.
+Each machine SHALL have one Ed25519 identity key, generated from the operating system's random number generator the first time it is needed and kept from then on. The machine's peer identity SHALL be the 32-byte Ed25519 public key. The identity SHALL be stored as a 37-byte identity file: the ASCII bytes `MFID`, a format version byte `1`, and the 32-byte private key seed. Reading an identity file that is not exactly this layout SHALL report an error and SHALL NOT generate a replacement key, because a new key would silently drop the machine from its desk.
 
 #### Scenario: First start creates an identity
 - **WHEN** no identity file exists

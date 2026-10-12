@@ -7,7 +7,7 @@ import type {
 } from "./bridge";
 
 export const NOT_RUNNING =
-  "DeskHop's service isn't running on this PC. This window connects as soon as it starts.";
+  "MouseFlock's service isn't running on this PC. This window connects as soon as it starts.";
 
 export function joinFailed(reason: JoinFailedReason | CommandError): string {
   switch (reason) {

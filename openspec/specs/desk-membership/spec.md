@@ -7,7 +7,7 @@ Keeps every machine in a desk trusting every other one, after a new machine has 
 ## Requirements
 
 ### Requirement: Membership records
-A membership record SHALL state that one machine (the subject) is added to or removed from the desk. It SHALL carry the subject's peer identity, an epoch (an unsigned 64-bit number that orders records about the same subject), the signer's peer identity, for an addition the subject's machine name (1 to 63 bytes of UTF-8), and the signer's Ed25519 signature. The signature SHALL cover the ASCII bytes `deskhop member record v1` followed by the record's wire encoding without the signature. A removal SHALL carry no name. An addition whose signer is its subject SHALL be invalid.
+A membership record SHALL state that one machine (the subject) is added to or removed from the desk. It SHALL carry the subject's peer identity, an epoch (an unsigned 64-bit number that orders records about the same subject), the signer's peer identity, for an addition the subject's machine name (1 to 63 bytes of UTF-8), and the signer's Ed25519 signature. The signature SHALL cover the ASCII bytes `mouseflock member record v1` followed by the record's wire encoding without the signature. A removal SHALL carry no name. An addition whose signer is its subject SHALL be invalid.
 
 #### Scenario: Valid signature
 - **WHEN** a member signs a record and another machine checks it
@@ -100,7 +100,7 @@ On every connection between two members, after the version handshake, each side 
 - **THEN** the receiver reports a protocol error
 
 ### Requirement: Trust store file
-A machine's membership view SHALL be stored as a trust store file: the ASCII bytes `DHTS`, a format version byte `1`, a record count (u16, little-endian), then each record as a length (u16, little-endian) followed by its wire encoding. Reading a trust store file that does not match this layout, or contains a record whose signature does not verify, SHALL report an error.
+A machine's membership view SHALL be stored as a trust store file: the ASCII bytes `MFTS`, a format version byte `1`, a record count (u16, little-endian), then each record as a length (u16, little-endian) followed by its wire encoding. Reading a trust store file that does not match this layout, or contains a record whose signature does not verify, SHALL report an error.
 
 #### Scenario: Round trip
 - **WHEN** a view is written to a trust store file and read back

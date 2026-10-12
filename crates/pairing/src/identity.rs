@@ -10,7 +10,7 @@ use crate::FileError;
 /// Bytes in an identity file: magic, version, seed.
 pub const IDENTITY_FILE_LEN: usize = 37;
 
-const MAGIC: &[u8; 4] = b"DHID";
+const MAGIC: &[u8; 4] = b"MFID";
 const VERSION: u8 = 1;
 
 /// PKCS#8 v1 header for an Ed25519 private key (RFC 8410), followed by the
@@ -41,7 +41,7 @@ impl Identity {
         self.key.sign(message).to_bytes()
     }
 
-    /// The identity file: `DHID`, version 1, the 32-byte seed.
+    /// The identity file: `MFID`, version 1, the 32-byte seed.
     pub fn to_file(&self) -> Zeroizing<[u8; IDENTITY_FILE_LEN]> {
         let mut out = Zeroizing::new([0; IDENTITY_FILE_LEN]);
         out[..4].copy_from_slice(MAGIC);
@@ -104,7 +104,7 @@ mod tests {
     fn first_start_creates_an_identity() {
         let identity = Identity::generate(&mut test_rng(1));
         let file = identity.to_file();
-        assert_eq!(&file[..5], b"DHID\x01");
+        assert_eq!(&file[..5], b"MFID\x01");
         let public = VerifyingKey::from_bytes(&identity.peer_id().0).unwrap();
         assert_eq!(public, identity.key.verifying_key());
     }
@@ -158,7 +158,7 @@ mod tests {
             0x44, 0x75, 0x58, 0x42,
         ];
         let mut file = [0; IDENTITY_FILE_LEN];
-        file[..5].copy_from_slice(b"DHID\x01");
+        file[..5].copy_from_slice(b"MFID\x01");
         file[5..].copy_from_slice(&seed);
         let der = Identity::from_file(&file).unwrap().to_pkcs8_der();
         let mut expected = PKCS8_PREFIX.to_vec();

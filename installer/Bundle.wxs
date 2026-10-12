@@ -1,18 +1,18 @@
 <!--
-  DeskHop's setup program (spec: installer; add-installer design D11). It runs
+  MouseFlock's setup program (spec: installer; add-installer design D11). It runs
   the MSI silently behind its own UI: an MSI run silently lets Restart Manager
-  close DeskHop's running programs without a reboot (D3). It owns the one
+  close MouseFlock's running programs without a reboot (D3). It owns the one
   Installed apps entry and offers to launch the tray app as the user.
 -->
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
      xmlns:bal="http://wixtoolset.org/schemas/v4/wxs/bal"
      xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
-  <Bundle Name="DeskHop"
-          Manufacturer="DeskHop"
+  <Bundle Name="MouseFlock"
+          Manufacturer="MouseFlock"
           Version="$(ProductVersion)"
           UpgradeCode="{E4D0472E-4507-4CAE-AB65-46A95D7B545A}"
           IconSourceFile="$(Icon)"
-          AboutUrl="https://github.com/deskhop/DeskHop">
+          AboutUrl="https://github.com/mouseflock/mouseflock">
 
     <!--
       Install, progress, then success with Launch. No licence to accept and no
@@ -24,19 +24,19 @@
                                               LicenseUrl=""
                                               SuppressOptionsUI="yes"
                                               ShowVersion="yes"
-                                              LaunchTarget="[ProgramFiles64Folder]DeskHop\DeskHop.exe" />
+                                              LaunchTarget="[ProgramFiles64Folder]MouseFlock\MouseFlock.exe" />
     </BootstrapperApplication>
 
-    <!-- D8: the development registration and DeskHop exclude each other. -->
-    <util:RegistrySearch Id="DevServiceImage" Variable="DeskHopServiceImage" Root="HKLM"
-                         Key="SYSTEM\CurrentControlSet\Services\DeskHop" Value="ImagePath"
+    <!-- D8: the development registration and MouseFlock exclude each other. -->
+    <util:RegistrySearch Id="DevServiceImage" Variable="MouseFlockServiceImage" Root="HKLM"
+                         Key="SYSTEM\CurrentControlSet\Services\MouseFlock" Value="ImagePath"
                          Result="value" Bitness="always64" />
-    <bal:Condition Message="DeskHop's development service is registered. Run tools\dev\service.ps1 uninstall from an elevated PowerShell first."
-                   Condition="NOT (DeskHopServiceImage ~&gt;&lt; &quot;DeskHop Dev&quot;)" />
+    <bal:Condition Message="MouseFlock's development service is registered. Run tools\dev\service.ps1 uninstall from an elevated PowerShell first."
+                   Condition="NOT (MouseFlockServiceImage ~&gt;&lt; &quot;MouseFlock Dev&quot;)" />
 
     <Chain>
       <!-- Hidden from Installed apps; Burn runs it with no UI of its own. -->
-      <MsiPackage Id="DeskHop" SourceFile="$(MsiPath)" Visible="no" />
+      <MsiPackage Id="MouseFlock" SourceFile="$(MsiPath)" Visible="no" />
     </Chain>
   </Bundle>
 </Wix>

@@ -18,7 +18,7 @@ pub const MAX_SUBJECTS: usize = 256;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct UnixTime(pub u64);
 
-const MAGIC: &[u8; 4] = b"DHTS";
+const MAGIC: &[u8; 4] = b"MFTS";
 const VERSION: u8 = 1;
 
 /// One machine's view of its desk: the winning record for each subject.
@@ -163,7 +163,7 @@ impl Desk {
         self.records.clear();
     }
 
-    /// The trust store file: `DHTS`, version 1, a u16 count, then each record
+    /// The trust store file: `MFTS`, version 1, a u16 count, then each record
     /// as a u16 length and its `MemberRecord` encoding.
     pub fn to_file(&self) -> Vec<u8> {
         let mut out = Vec::new();

@@ -11,8 +11,8 @@ The license must be decided before the first external contribution. Changing it 
 
 ## Decision
 
-1. The `deskhop` repository (engine, protocol, service, agents, Tauri client, installer) is licensed **Apache-2.0**.
-2. The **DeskHop** name and mark are trademarked. Forks are welcome under the license but may not use the name.
+1. The `mouseflock` repository (engine, protocol, service, agents, Tauri client, installer) is licensed **Apache-2.0**.
+2. The **MouseFlock** name and mark will be registered as trademarks. Forks are welcome under the license but may not use the name.
 3. No contributor license agreement. Contributions are accepted under the repository license via the standard Apache-2.0 inbound=outbound terms.
 4. The client is complete on its own: no account, no server, no telemetry, no network dependency beyond the peers on the LAN.
 

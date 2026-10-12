@@ -1,4 +1,4 @@
-//! The `deskhop-clipboard` thread (add-text-clipboard design D5,
+//! The `mouseflock-clipboard` thread (add-text-clipboard design D5,
 //! add-clipboard-images D5): a hidden window listening for clipboard changes,
 //! reading a copy once the clipboard has been still for [`SETTLE_MS`], and
 //! writing the text and images it is given.
@@ -56,7 +56,7 @@ const OPEN_RETRY: Duration = Duration::from_millis(20);
 const SETTLE: usize = 1;
 /// Posted to the thread when a copy is waiting to be set.
 const WM_SET: u32 = WM_APP;
-const CLASS: PCWSTR = w!("DeskHopClipboard");
+const CLASS: PCWSTR = w!("MouseFlockClipboard");
 
 /// What the clipboard held after a copy settled, or why a received image
 /// could not be set.
@@ -152,7 +152,7 @@ pub fn start() -> windows::core::Result<(Clipboard, Receiver<Copied>)> {
     let (sets, set_rx) = mpsc::channel();
     let (ready_tx, ready_rx) = mpsc::sync_channel(1);
     let handle = std::thread::Builder::new()
-        .name("deskhop-clipboard".into())
+        .name("mouseflock-clipboard".into())
         .spawn(move || run(&tx, &set_rx, &ready_tx))
         .map_err(windows::core::Error::from)?;
     match ready_rx.recv() {
@@ -267,7 +267,7 @@ fn window() -> windows::core::Result<HWND> {
         CreateWindowExW(
             WS_EX_TOOLWINDOW | WINDOW_EX_STYLE(0),
             CLASS,
-            w!("DeskHop"),
+            w!("MouseFlock"),
             WINDOW_STYLE(0),
             0,
             0,
@@ -617,9 +617,9 @@ mod desktop {
     #[ignore = "uses the desktop clipboard"]
     fn set_is_not_reported() {
         let (clipboard, rx) = start().unwrap();
-        clipboard.set("deskhop set test".into());
+        clipboard.set("mouseflock set test".into());
         quiet(&rx, Duration::from_millis(600));
-        assert_eq!(read(None), Some(Copied::Text("deskhop set test".into())));
+        assert_eq!(read(None), Some(Copied::Text("mouseflock set test".into())));
     }
 
     #[test]
@@ -627,12 +627,12 @@ mod desktop {
     fn copy_is_reported_once() {
         let (_clipboard, rx) = start().unwrap();
         for i in 0..3 {
-            copy(&format!("deskhop burst {i}"), &[]);
+            copy(&format!("mouseflock burst {i}"), &[]);
             std::thread::sleep(Duration::from_millis(15));
         }
         assert_eq!(
             rx.recv_timeout(WAIT).unwrap(),
-            Copied::Text("deskhop burst 2".into())
+            Copied::Text("mouseflock burst 2".into())
         );
         quiet(&rx, Duration::from_millis(400));
     }
@@ -643,16 +643,16 @@ mod desktop {
         let (_clipboard, rx) = start().unwrap();
         let (exclude, history, cloud) = marker_formats();
         let zero = 0u32.to_le_bytes().to_vec();
-        copy("deskhop secret", &[(cloud, zero.clone())]);
+        copy("mouseflock secret", &[(cloud, zero.clone())]);
         assert_eq!(rx.recv_timeout(WAIT).unwrap(), Copied::Private);
-        copy("deskhop secret", &[(history, zero)]);
+        copy("mouseflock secret", &[(history, zero)]);
         assert_eq!(rx.recv_timeout(WAIT).unwrap(), Copied::Private);
-        copy("deskhop secret", &[(exclude, Vec::new())]);
+        copy("mouseflock secret", &[(exclude, Vec::new())]);
         assert_eq!(rx.recv_timeout(WAIT).unwrap(), Copied::Private);
-        copy("deskhop shared", &[(cloud, 1u32.to_le_bytes().to_vec())]);
+        copy("mouseflock shared", &[(cloud, 1u32.to_le_bytes().to_vec())]);
         assert_eq!(
             rx.recv_timeout(WAIT).unwrap(),
-            Copied::Text("deskhop shared".into())
+            Copied::Text("mouseflock shared".into())
         );
     }
 
@@ -660,7 +660,7 @@ mod desktop {
     #[ignore = "uses the desktop clipboard"]
     fn copy_without_text_is_no_text() {
         let (_clipboard, rx) = start().unwrap();
-        let custom = format(w!("DeskHop test format"));
+        let custom = format(w!("MouseFlock test format"));
         assert!(write(None, &[], &[(custom, b"not text".to_vec())]));
         assert_eq!(rx.recv_timeout(WAIT).unwrap(), Copied::NoText);
     }
@@ -720,10 +720,10 @@ mod desktop {
     fn text_wins_over_an_image() {
         let (_clipboard, rx) = start().unwrap();
         let png = dib_to_png(&dib_2x2([[1, 2, 3, 255]; 4])).unwrap();
-        copy("deskhop cells", &[(png_format(), png)]);
+        copy("mouseflock cells", &[(png_format(), png)]);
         assert_eq!(
             rx.recv_timeout(WAIT).unwrap(),
-            Copied::Text("deskhop cells".into())
+            Copied::Text("mouseflock cells".into())
         );
     }
 
@@ -772,17 +772,17 @@ mod desktop {
     #[ignore = "uses the desktop clipboard"]
     fn corrupt_image_leaves_the_clipboard_alone() {
         let (clipboard, rx) = start().unwrap();
-        copy("deskhop before", &[]);
+        copy("mouseflock before", &[]);
         assert_eq!(
             rx.recv_timeout(WAIT).unwrap(),
-            Copied::Text("deskhop before".into())
+            Copied::Text("mouseflock before".into())
         );
         let mut bad = dib_to_png(&dib_2x2([[1, 2, 3, 255]; 4])).unwrap();
         let n = bad.len();
         bad[n / 2] ^= 0xff;
         clipboard.set_image(bad);
         assert!(matches!(rx.recv_timeout(WAIT).unwrap(), Copied::NotSet(_)));
-        assert_eq!(read(None), Some(Copied::Text("deskhop before".into())));
+        assert_eq!(read(None), Some(Copied::Text("mouseflock before".into())));
     }
 
     /// `CF_HDROP` bytes for `paths`, as Explorer puts them on the clipboard:
@@ -807,7 +807,7 @@ mod desktop {
     #[ignore = "uses the desktop clipboard"]
     fn copied_files_are_reported_as_a_file_copy() {
         let (_clipboard, rx) = start().unwrap();
-        let dir = std::env::temp_dir().join("deskhop-hdrop");
+        let dir = std::env::temp_dir().join("mouseflock-hdrop");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("folder").join("empty")).unwrap();
         std::fs::write(dir.join("folder").join("a.txt"), b"abc").unwrap();
@@ -838,15 +838,15 @@ mod desktop {
     #[ignore = "uses the desktop clipboard"]
     fn text_wins_over_files() {
         let (_clipboard, rx) = start().unwrap();
-        let file = std::env::temp_dir().join("deskhop-hdrop-text.txt");
+        let file = std::env::temp_dir().join("mouseflock-hdrop-text.txt");
         std::fs::write(&file, b"x").unwrap();
         copy(
-            "deskhop with files",
+            "mouseflock with files",
             &[(u32::from(CF_HDROP.0), hdrop(&[file]))],
         );
         assert_eq!(
             rx.recv_timeout(WAIT).unwrap(),
-            Copied::Text("deskhop with files".into())
+            Copied::Text("mouseflock with files".into())
         );
     }
 
