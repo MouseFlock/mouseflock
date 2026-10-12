@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Defines the envelope of the named-pipe protocol between the DeskHop service, its agents and the UI: how bytes become messages, how the two ends agree on a version and say what they are, and how decoding stays safe when the less trusted end sends anything at all.
+Defines the envelope of the named-pipe protocol between the MouseFlock service, its agents and the UI: how bytes become messages, how the two ends agree on a version and say what they are, and how decoding stays safe when the less trusted end sends anything at all.
 
 ## Requirements
 

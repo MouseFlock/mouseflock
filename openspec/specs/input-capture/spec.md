@@ -51,14 +51,14 @@ A mouse movement SHALL be reported as the device's raw relative movement, before
 - **THEN** the reported cursor position is (2879, 1799)
 
 ### Requirement: Origin of each event
-An event SHALL be reported as physical when it comes from a keyboard or mouse attached to this machine, and as injected when software produced it, whether that software is DeskHop or another program.
+An event SHALL be reported as physical when it comes from a keyboard or mouse attached to this machine, and as injected when software produced it, whether that software is MouseFlock or another program.
 
 #### Scenario: Physical key
 - **WHEN** the user presses a key on this machine's keyboard
 - **THEN** the key is reported as physical
 
 #### Scenario: DeskHop's own injection
-- **WHEN** DeskHop injects a key press on a peer's behalf
+- **WHEN** MouseFlock injects a key press on a peer's behalf
 - **THEN** that key press is reported as injected
 
 #### Scenario: Another program's injection
@@ -84,7 +84,7 @@ Physical input SHALL be kept from this machine's OS according to the capture mod
 Injected input SHALL reach this machine's OS in every capture mode.
 
 #### Scenario: Injection while withholding
-- **WHEN** the capture mode is `withhold all` and DeskHop injects a key press
+- **WHEN** the capture mode is `withhold all` and MouseFlock injects a key press
 - **THEN** the focused application receives the key
 
 ### Requirement: Withholding never waits

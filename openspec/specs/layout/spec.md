@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Learns which peer lies beyond each edge of a machine's screens from how the user moves the cursor, so that DeskHop works without anyone arranging screens, and lets the user take back a wrong guess.
+Learns which peer lies beyond each edge of a machine's screens from how the user moves the cursor, so that MouseFlock works without anyone arranging screens, and lets the user take back a wrong guess.
 
 ## Requirements
 

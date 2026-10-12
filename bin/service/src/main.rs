@@ -1,4 +1,4 @@
-//! `deskhop-service.exe`: Windows service, SYSTEM, session 0.
+//! `mouseflock-service.exe`: Windows service, SYSTEM, session 0.
 //!
 //! Owns transport, pairing keys, and the engine. Launches the session agent
 //! and the winlogon agent into the console session; every launch goes
@@ -35,7 +35,7 @@ use log::Log;
 use supervisor::SupervisorCommand;
 
 const USAGE: &str =
-    "usage: deskhop-service [--console [--data <dir>] [--port <n>]] | --remove-data";
+    "usage: mouseflock-service [--console [--data <dir>] [--port <n>]] | --remove-data";
 
 #[derive(Debug, PartialEq, Eq)]
 enum Mode {
@@ -207,13 +207,13 @@ fn console_main(data: Option<PathBuf>, port: u16) -> ExitCode {
     {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("deskhop-service: {e}");
+            eprintln!("mouseflock-service: {e}");
             return ExitCode::FAILURE;
         }
     };
     runtime.block_on(async {
         let Some(dir) = data.or_else(store::console_dir) else {
-            eprintln!("deskhop-service: LOCALAPPDATA is not set; give a folder with --data");
+            eprintln!("mouseflock-service: LOCALAPPDATA is not set; give a folder with --data");
             return ExitCode::FAILURE;
         };
         let log = Log::stderr();
@@ -222,12 +222,12 @@ fn console_main(data: Option<PathBuf>, port: u16) -> ExitCode {
             match start(true, dir.clone(), port, log, Some(reports_tx), Sas::Console).await {
                 Ok(s) => s,
                 Err(e) => {
-                    eprintln!("deskhop-service: {e}");
+                    eprintln!("mouseflock-service: {e}");
                     return ExitCode::FAILURE;
                 }
             };
         println!(
-            "DeskHop console, data in {}. Type `help` for commands.",
+            "MouseFlock console, data in {}. Type `help` for commands.",
             dir.display()
         );
         tokio::select! {
@@ -264,7 +264,7 @@ fn main() -> ExitCode {
         Ok(Mode::Console { data, port }) => console_main(data, port),
         Ok(Mode::RemoveData) => remove_data(),
         Err(e) => {
-            eprintln!("deskhop-service: {e}\n{USAGE}");
+            eprintln!("mouseflock-service: {e}\n{USAGE}");
             ExitCode::from(2)
         }
     }
@@ -314,7 +314,7 @@ mod tests {
     async fn port_taken_names_the_port() {
         let held = std::net::UdpSocket::bind("0.0.0.0:0").unwrap();
         let port = held.local_addr().unwrap().port();
-        let dir = std::env::temp_dir().join(format!("deskhop-port-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("mouseflock-port-{}", std::process::id()));
         let Err(e) = start(true, dir.clone(), port, Log::memory(), None, Sas::Console).await else {
             panic!("started on a taken port");
         };

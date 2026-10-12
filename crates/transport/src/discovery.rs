@@ -10,7 +10,7 @@ use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
 use model::PeerId;
 
 /// The DNS-SD service type.
-pub const SERVICE_TYPE: &str = "_deskhop._udp.local.";
+pub const SERVICE_TYPE: &str = "_mouseflock._udp.local.";
 
 /// One machine seen on the network.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -92,7 +92,7 @@ impl Mdns {
         mdns.advertise(false)?;
         let events = mdns.daemon.browse(SERVICE_TYPE)?;
         std::thread::Builder::new()
-            .name("deskhop-mdns".to_owned())
+            .name("mouseflock-mdns".to_owned())
             .spawn(move || {
                 while let Ok(event) = events.recv() {
                     if let ServiceEvent::ServiceResolved(info) = event {
@@ -115,7 +115,7 @@ impl Mdns {
     /// Advertises again, with `pair=1` while `pairing`.
     pub fn advertise(&self, pairing: bool) -> Result<(), mdns_sd::Error> {
         let name = instance_name(&self.id);
-        let host = format!("deskhop-{name}.local.");
+        let host = format!("mouseflock-{name}.local.");
         let properties: HashMap<String, String> = txt(&self.id, pairing).into_iter().collect();
         let info = ServiceInfo::new(SERVICE_TYPE, &name, &host, "", self.port, properties)?
             .enable_addr_auto();

@@ -1,8 +1,8 @@
-# DeskHop threat model
+# MouseFlock threat model
 
 *Status: covers the wire, pairing, desk membership, the LAN transport, forwarded input, the agent → service and UI → service pipes, the UI app, the clipboard (text, images and files, including untrusted image data and arriving files), the service's data folder, console mode, secure attention, the secure desktop, elevated windows on the user's desktop, and installing and uninstalling.*
 
-DeskHop injects keystrokes received over the network, and its service runs as SYSTEM. This document records what it defends against and where.
+MouseFlock injects keystrokes received over the network, and its service runs as SYSTEM. This document records what it defends against and where.
 
 ## Assets
 
@@ -62,14 +62,14 @@ Any host on the LAN can reach UDP 47391 and mDNS. The goals: it learns nothing a
 - **Records are withheld from strangers.** On a member connection, the dialer, which has pinned the listener, sends its records first. The listener sends its own, which carry machine names, only after the dialer has proved to be a member. A stranger gets close code `5` and nothing else.
 - **Introduction needs a member's signature.** A key unknown to the listener becomes a member only through a record that an existing member signed (see "Desk membership").
 - **Bounded state for strangers.** A connection from a key that is not a member must send `PairPake` or finish introducing itself within 10 seconds, and at most 8 are held at once. More are closed straight after their handshake.
-- **What an advertisement reveals:** that a DeskHop machine is at this address; its public key, which is not secret; and whether pairing mode is open right now. It does not reveal the machine's name or the desk's members.
+- **What an advertisement reveals:** that a MouseFlock machine is at this address; its public key, which is not secret; and whether pairing mode is open right now. It does not reveal the machine's name or the desk's members.
 - **Firewall.** `add-installer` must allow inbound UDP 47391 and mDNS (UDP 5353) for the service only.
 
 Residual risks:
 
 - **Handshake cost.** Each stranger handshake costs the service an Ed25519 signature and a verification. The limit on strangers bounds what they hold open, not how fast they handshake; rate limiting is left to the firewall unless it becomes a problem.
 - **Liveness tuning.** A host that can drop packets between two members for about a second makes them report each other lost. Losing a peer releases held keys, so this costs availability, not safety.
-- **Presence on the LAN.** Advertisements show which hosts run DeskHop, and when someone is pairing.
+- **Presence on the LAN.** Advertisements show which hosts run MouseFlock, and when someone is pairing.
 
 ### Forwarded input (LAN → service)
 
@@ -104,7 +104,7 @@ Residual risk: another process running as the same user can open the pipe if it 
 A UI can pair this machine with another, remove members, and change the learned layout. Pairing adds a machine that can then type into this one, so who can reach the UI pipe matters. Specified in `openspec/specs/ui-link/spec.md`.
 
 - **Who can connect.**
-  - The pipe `\\.\pipe\deskhop-ui` refuses remote clients.
+  - The pipe `\\.\pipe\mouseflock-ui` refuses remote clients.
   - Its protected ACL admits SYSTEM and interactive users (`IU`).
   - The service then accepts a client only if the connecting process runs in the active console session, before reading a byte from it. A UI in an RDP session, or in a session switched away from the console, is closed.
   - In console mode the pipe admits only the user running console mode.
@@ -115,14 +115,14 @@ A UI can pair this machine with another, remove members, and change the learned 
   - Every message has a fixed or bounded layout (names up to 63 bytes, codes up to 32, at most 256 members), under the same no-panic decoding and fuzzing as the rest of `ipc`. A UI that breaks it is closed alone.
   - Sending to a UI never waits, and a UI with more than 256 unsent messages is disconnected.
   - Commands are cheap, and pairing attempts are limited by pairing mode itself.
-- **Pipe squatting.** A process that created `\\.\pipe\deskhop-ui` before the service could pose as the service to UIs: show a wrong code, or collect a typed one.
+- **Pipe squatting.** A process that created `\\.\pipe\mouseflock-ui` before the service could pose as the service to UIs: show a wrong code, or collect a typed one.
   - The service starts at boot and creates the name as the first instance before anyone logs on. It keeps one instance listening at all times, so the name never falls free while it runs.
   - If the name is taken at start, the service logs it and retries every 5 seconds.
-  - **The UI checks the server before sending anything.** Before its `Hello`, `DeskHop.exe` asks for the session of the process serving the pipe (`GetNamedPipeServerSessionId`, in `win32-shell`, ADR 0007). It goes on only if that is session 0, where only services run; anything else is dropped unread, and the UI shows that the service isn't running. A squatter running as a user cannot run in session 0, and a process in session 0 is a service an administrator installed, who is outside this threat model. Specified in `openspec/specs/desktop-app/spec.md`.
-  - **Development builds** also accept a server in their own session, so they work with `deskhop-service --console`. Release builds, the only ones the installer ships, never do.
+  - **The UI checks the server before sending anything.** Before its `Hello`, `MouseFlock.exe` asks for the session of the process serving the pipe (`GetNamedPipeServerSessionId`, in `win32-shell`, ADR 0007). It goes on only if that is session 0, where only services run; anything else is dropped unread, and the UI shows that the service isn't running. A squatter running as a user cannot run in session 0, and a process in session 0 is a service an administrator installed, who is outside this threat model. Specified in `openspec/specs/desktop-app/spec.md`.
+  - **Development builds** also accept a server in their own session, so they work with `mouseflock-service --console`. Release builds, the only ones the installer ships, never do.
 
-**The UI app itself** (`DeskHop.exe`) runs as the user and holds no keys. Pairing codes pass through it only as they are shown or typed.
-- **The webview** loads only the app's own pages (CSP `default-src 'self'`), never remote content. It can call only DeskHop's own commands; no file, shell or HTTP plugin is included. The Undo popup's window may call only `view` and `undo`.
+**The UI app itself** (`MouseFlock.exe`) runs as the user and holds no keys. Pairing codes pass through it only as they are shown or typed.
+- **The webview** loads only the app's own pages (CSP `default-src 'self'`), never remote content. It can call only MouseFlock's own commands; no file, shell or HTTP plugin is included. The Undo popup's window may call only `view` and `undo`.
 - **Start with Windows** is a value under the user's own `Run` key. Anything running as the user could change it, but such a process could already run anything as that user.
 
 Residual risks:
@@ -177,9 +177,9 @@ Residual risks:
 
 The identity key and trust store are files that only SYSTEM can read. A local administrator can read or replace them. A local administrator can already inject input and read the clipboard, so this is outside the threat model; DPAPI was rejected for the same reason.
 
-Defenses for the data folder (`%ProgramData%\DeskHop`), specified in `openspec/specs/service-host/spec.md`:
+Defenses for the data folder (`%ProgramData%\MouseFlock`), specified in `openspec/specs/service-host/spec.md`:
 
-- **Owned by SYSTEM before anything is read.** `ProgramData` lets standard users create folders, so a user could create `DeskHop` first and plant an identity, a trust store or layouts in it. At every start, before reading a file, the service checks the folder:
+- **Owned by SYSTEM before anything is read.** `ProgramData` lets standard users create folders, so a user could create `MouseFlock` first and plant an identity, a trust store or layouts in it. At every start, before reading a file, the service checks the folder:
   - owned by SYSTEM or Administrators: its owner is set to SYSTEM and its protected, SYSTEM-only ACL is applied again;
   - anything else (another owner, a junction or symbolic link, a file): it is moved aside unread and a new folder is created.
 - **Atomic, checked files.** Every file is written to a temporary file and renamed over the old one. A file that does not parse, or is larger than 1 MiB, is moved aside and treated as absent; nothing partial is used. A damaged identity costs the desk (peers must pair again), which is logged as an error.
@@ -187,7 +187,7 @@ Defenses for the data folder (`%ProgramData%\DeskHop`), specified in `openspec/s
 
 ### Console mode (development)
 
-`deskhop-service --console` runs as the logged-in user and keeps its data in the user's profile (`%LOCALAPPDATA%\DeskHop\console`), never in the service's folder. Its identity and trust store are therefore as safe as the user's own files: any process running as that user can read them, and could pose as this console-mode machine to its peers. It is a development tool, and the registered service never reads its files.
+`mouseflock-service --console` runs as the logged-in user and keeps its data in the user's profile (`%LOCALAPPDATA%\MouseFlock\console`), never in the service's folder. Its identity and trust store are therefore as safe as the user's own files: any process running as that user can read them, and could pose as this console-mode machine to its peers. It is a development tool, and the registered service never reads its files.
 
 ### Secure attention (Ctrl-Alt-Del)
 
@@ -213,7 +213,7 @@ Windows shows UAC prompts, the lock screen and the logon screen on the secure de
   - answer its UAC prompts, including a consent prompt that asks an administrator for no password;
   - type at its lock and logon screens.
 
-  This is what a physical keyboard at that machine can do. DeskHop never learns a password except as keystrokes in transit, which are encrypted on QUIC and never logged.
+  This is what a physical keyboard at that machine can do. MouseFlock never learns a password except as keystrokes in transit, which are encrypted on QUIC and never logged.
 - **Local keystrokes on the secure desktop.**
   - A password typed at the machine's own keyboard reaches the service the same way desktop keystrokes do, so the engine can tell local input from its own.
   - It is never logged: the service logs only how many input events the agent reported while it had the input.
@@ -248,13 +248,13 @@ Residual risks:
 The package (`installer/`) runs as SYSTEM through Windows Installer and changes the machine on the user's one consent. People run it through the setup program, a WiX Burn bundle that runs the package silently. The bundle is a second unsigned executable, and it is elevated once by Windows' consent prompt. Specified in `openspec/specs/installer/spec.md`.
 
 - **Where the programs live.**
-  - The service, the agent and the tray app are installed in `C:\Program Files\DeskHop`, which inherits Program Files' ACL: only administrators and SYSTEM can write there.
+  - The service, the agent and the tray app are installed in `C:\Program Files\MouseFlock`, which inherits Program Files' ACL: only administrators and SYSTEM can write there.
   - The service runs as SYSTEM from that folder and launches the winlogon agent as SYSTEM from it too, so a folder users could write would hand them SYSTEM.
   - The package sets no permissions of its own.
-  - The development script copies its build to `Program Files\DeskHop Dev` for the same reason.
+  - The development script copies its build to `Program Files\MouseFlock Dev` for the same reason.
 - **Firewall on every network type.**
-  - The rules admit UDP 47391 and 5353 to `deskhop-service.exe` only, on domain, private and public networks.
-  - Windows marks a newly joined network public, home Wi-Fi included, and leaving public out would make DeskHop silently fail there.
+  - The rules admit UDP 47391 and 5353 to `mouseflock-service.exe` only, on domain, private and public networks.
+  - Windows marks a newly joined network public, home Wi-Fi included, and leaving public out would make MouseFlock silently fail there.
   - On a public network, any host on it can therefore reach what "Hostile bytes on the wire" and "Strangers and spoofing on the LAN" already defend: strict, bounded, fuzzed decoding, a QUIC handshake pinned to member keys, and pairing that opens only when the user asks.
   - No other program or port is opened.
 - **Secure attention policy.**
@@ -266,12 +266,12 @@ The package (`installer/`) runs as SYSTEM through Windows Installer and changes 
   - The bootstrapper itself downloads the runtime from Microsoft.
   - A failure leaves the install successful, without the tray app's runtime.
 - **Uninstall removes the identity.**
-  - Removing DeskHop deletes `C:\ProgramData\DeskHop`, with the identity key, so no private key outlives the install.
-  - Any user can create folders in `C:\ProgramData`, and until the service first starts, `DeskHop` there could be a user's junction to another folder. So the removal step, which runs as SYSTEM, is the service's own `--remove-data`.
+  - Removing MouseFlock deletes `C:\ProgramData\MouseFlock`, with the identity key, so no private key outlives the install.
+  - Any user can create folders in `C:\ProgramData`, and until the service first starts, `MouseFlock` there could be a user's junction to another folder. So the removal step, which runs as SYSTEM, is the service's own `--remove-data`.
   - `--remove-data` removes the folder only if it is a real folder owned by SYSTEM or Administrators, as `secure_folder` would keep. A link, a file, or another owner's folder is left untouched, along with what it points to.
   - The removal never follows a link inside the folder.
   - An upgrade keeps the folder.
-- **The tray app on upgrade and uninstall.** The package ends running copies of `DeskHop.exe` before replacing or removing files. Its state lives in the service, so nothing is lost. Agents end when the service stops.
+- **The tray app on upgrade and uninstall.** The package ends running copies of `MouseFlock.exe` before replacing or removing files. Its state lives in the service, so nothing is lost. Agents end when the service stops.
 
 Residual risks:
 - The packages are not code-signed yet. A user cannot tell a genuine package from a tampered one except by comparing its hash with the CI artifact's. Signing comes with a release pipeline.

@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Lets text and images copied on one DeskHop machine be pasted on another. A copy follows the cursor: it is announced to the desk, and its contents move only to the machines the cursor crosses into.
+Lets text and images copied on one MouseFlock machine be pasted on another. A copy follows the cursor: it is announced to the desk, and its contents move only to the machines the cursor crosses into.
 
 ## Requirements
 
@@ -184,7 +184,7 @@ An image SHALL be shared only if its PNG is at most 33,554,432 bytes (32 MiB) an
 A machine SHALL announce an image copy only to members whose connection agreed protocol version 2 or later. It SHALL announce text copies to every up member, whatever version their connection agreed.
 
 #### Scenario: Member running 0.1.0
-- **WHEN** A runs this release, C runs DeskHop 0.1.0 and agreed version 1, and A's user copies an image
+- **WHEN** A runs this release, C speaks only protocol version 1 and agreed version 1, and A's user copies an image
 - **THEN** C receives no `ClipboardOffer` for it, C's connection stays up, and text copies still reach C
 
 ### Requirement: The service never decodes images

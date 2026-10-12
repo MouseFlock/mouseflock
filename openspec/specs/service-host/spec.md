@@ -2,15 +2,15 @@
 
 ## Purpose
 
-The DeskHop service process. It runs under the Service Control Manager or in console mode, keeps this machine's identity and learned state on disk, connects the engine to the session agent and to peers, and handles sleep, secure attention and shutdown.
+The MouseFlock service process. It runs under the Service Control Manager or in console mode, keeps this machine's identity and learned state on disk, connects the engine to the session agent and to peers, and handles sleep, secure attention and shutdown.
 
 ## Requirements
 
 ### Requirement: Service and console modes
-`deskhop-service.exe` started by the Service Control Manager SHALL run as the service named `DeskHop`. Started with `--console`, it SHALL run as the current user in the current session. Console mode SHALL keep its data under the user's local application data, or in the folder given with `--data`, and SHALL never touch the service's data folder. `--port` SHALL set its UDP port. If the port is taken, it SHALL exit with an error naming the port.
+`mouseflock-service.exe` started by the Service Control Manager SHALL run as the service named `MouseFlock`. Started with `--console`, it SHALL run as the current user in the current session. Console mode SHALL keep its data under the user's local application data, or in the folder given with `--data`, and SHALL never touch the service's data folder. `--port` SHALL set its UDP port. If the port is taken, it SHALL exit with an error naming the port.
 
 #### Scenario: Console mode's own folder
-- **WHEN** the service is registered and a user starts `deskhop-service --console`
+- **WHEN** the service is registered and a user starts `mouseflock-service --console`
 - **THEN** console mode uses a data folder under that user's profile and leaves the service's files untouched
 
 #### Scenario: Two console instances

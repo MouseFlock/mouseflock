@@ -1,7 +1,7 @@
 import { act, render } from "@testing-library/react";
 import type { ReactElement } from "react";
 import type { Bridge } from "../bridge";
-import { BridgeContext } from "../useDeskhop";
+import { BridgeContext } from "../useMouseFlock";
 
 /** Renders `ui` against `bridge` and lets its first promises settle. */
 export async function mount(bridge: Bridge, ui: ReactElement) {

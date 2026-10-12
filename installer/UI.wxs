@@ -5,7 +5,7 @@
 -->
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
   <Fragment>
-    <UI Id="DeskHopUI">
+    <UI Id="MouseFlockUI">
       <TextStyle Id="WixUI_Font_Normal" FaceName="Segoe UI" Size="9" />
       <TextStyle Id="WixUI_Font_Bigger" FaceName="Segoe UI" Size="12" />
       <TextStyle Id="WixUI_Font_Title" FaceName="Segoe UI" Size="9" Bold="yes" />
@@ -13,7 +13,7 @@
 
       <DialogRef Id="ErrorDlg" />
       <DialogRef Id="FatalError" />
-      <!-- Asking once to close DeskHop's running programs (Package.wxs, MSIRMSHUTDOWN). -->
+      <!-- Asking once to close MouseFlock's running programs (Package.wxs, MSIRMSHUTDOWN). -->
       <DialogRef Id="FilesInUse" />
       <DialogRef Id="MsiRMFilesInUse" />
       <DialogRef Id="PrepareDlg" />
@@ -22,20 +22,20 @@
       <DialogRef Id="UserExit" />
       <DialogRef Id="ExitDialog" />
 
-      <Publish Dialog="ExitDialog" Control="Finish" Event="DoAction" Value="StartDeskHop" Order="1"
+      <Publish Dialog="ExitDialog" Control="Finish" Event="DoAction" Value="StartMouseFlock" Order="1"
                Condition="WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 AND NOT Installed" />
       <Publish Dialog="ExitDialog" Control="Finish" Event="EndDialog" Value="Return" Order="999" />
     </UI>
     <UIRef Id="WixUI_Common" />
 
-    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT" Value="Start DeskHop" />
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT" Value="Start MouseFlock" />
     <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOX" Value="1" />
 
     <!--
       Runs in the UI sequence, in msiexec's client process: for a package
       opened by double-clicking, the user's own unelevated process.
     -->
-    <Property Id="WixShellExecTarget" Value="[#DeskHopExe]" />
-    <CustomAction Id="StartDeskHop" BinaryRef="Wix4UtilCA_$(sys.BUILDARCHSHORT)" DllEntry="WixShellExec" Impersonate="yes" Return="ignore" />
+    <Property Id="WixShellExecTarget" Value="[#MouseFlockExe]" />
+    <CustomAction Id="StartMouseFlock" BinaryRef="Wix4UtilCA_$(sys.BUILDARCHSHORT)" DllEntry="WixShellExec" Impersonate="yes" Return="ignore" />
   </Fragment>
 </Wix>

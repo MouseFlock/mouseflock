@@ -19,7 +19,7 @@ use crate::host::{GOODBYE_WAIT, HostCommand, Sas};
 use crate::log::Log;
 use crate::{error, info, store};
 
-pub const SERVICE_NAME: &str = "DeskHop";
+pub const SERVICE_NAME: &str = "MouseFlock";
 
 /// What a service control asks of the service.
 #[derive(Debug, PartialEq, Eq)]
@@ -55,7 +55,7 @@ pub fn run() -> ExitCode {
                 .map(|s| format!(": {s}"))
                 .unwrap_or_default();
             eprintln!(
-                "deskhop-service: {e}{cause}\n\
+                "mouseflock-service: {e}{cause}\n\
                  It runs as the Windows service `{SERVICE_NAME}` (see tools/dev/service.ps1), \
                  or in a terminal with --console."
             );

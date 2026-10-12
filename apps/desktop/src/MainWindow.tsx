@@ -4,7 +4,7 @@ import type { Focus, Page, View } from "./bridge";
 import { AddPc } from "./AddPc";
 import { Members } from "./Members";
 import { FORGOTTEN, NOT_RUNNING } from "./text";
-import { useBridge, useSubscription, useView } from "./useDeskhop";
+import { useBridge, useSubscription, useView } from "./useMouseFlock";
 
 function focusLine(focus: Focus): string | null {
   switch (focus.state) {
@@ -33,7 +33,7 @@ export function MainWindow() {
   return (
     <main>
       <header>
-        <h1>{status?.name ?? "DeskHop"}</h1>
+        <h1>{status?.name ?? "MouseFlock"}</h1>
         {!view.connected && <p role="status">{NOT_RUNNING}</p>}
         {focus && <p className="focus">{focus}</p>}
       </header>

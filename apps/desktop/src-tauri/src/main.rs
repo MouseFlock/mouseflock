@@ -1,4 +1,4 @@
-//! `DeskHop.exe`: optional Tauri shell. Tray, autostart, pipe client.
+//! `MouseFlock.exe`: optional Tauri shell. Tray, autostart, pipe client.
 //!
 //! Nothing changes when it is closed. No engine logic here: it shows what
 //! the service reports and passes the user's choices back as UI commands.
@@ -28,7 +28,7 @@ fn main() {
         }))
         .plugin(
             tauri_plugin_autostart::Builder::new()
-                .app_name("DeskHop")
+                .app_name("MouseFlock")
                 .build(),
         )
         .invoke_handler(tauri::generate_handler![
@@ -44,5 +44,5 @@ fn main() {
         .on_window_event(shell::on_window_event)
         .setup(|app| shell::setup(app.handle()))
         .run(tauri::generate_context!())
-        .expect("failed to run DeskHop");
+        .expect("failed to run MouseFlock");
 }

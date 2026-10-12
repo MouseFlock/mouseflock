@@ -16,13 +16,13 @@ use zeroize::Zeroize;
 use crate::Code;
 
 /// The TLS exporter label `transport` uses for [`Binding::exporter`].
-pub const EXPORTER_LABEL: &[u8] = b"EXPORTER-deskhop-pair-v1";
+pub const EXPORTER_LABEL: &[u8] = b"EXPORTER-mouseflock-pair-v1";
 
 /// Bytes `transport` exports for [`Binding::exporter`], with an empty context.
 pub const EXPORTER_LEN: usize = 32;
 
 /// SPAKE2 symmetric identity, and the HKDF salt for the tags.
-const PROTOCOL_LABEL: &[u8] = b"deskhop pair v1";
+const PROTOCOL_LABEL: &[u8] = b"mouseflock pair v1";
 
 /// What ties a pairing to one connection, as this side sees it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -146,9 +146,9 @@ mod tests {
     // means the derivation, the SPAKE2 crate, or the code format changed, and
     // peers built before and after would no longer pair.
     const KNOWN_JOINER_TAG: &str =
-        "c9fe26cd87feda2bb3160015905b3576ac3059b1e798929468f0892e330f21ed";
+        "b152bd20747458fea9391951c1d213a17de4d230829f1a1fa1a78b428459ad1f";
     const KNOWN_INVITER_TAG: &str =
-        "0ce846d1e93918f994b2e779700032891e1b408972bab26af8b06e923426edce";
+        "7ec7876f0139662c7d0a7b63ecc9fa83d561557437c5c5f3722da5942a09d1ab";
 
     #[test]
     fn known_answer() {

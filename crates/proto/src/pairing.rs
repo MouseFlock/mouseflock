@@ -24,7 +24,7 @@ pub const SIGNATURE_LEN: usize = 64;
 pub const MAX_NAME_LEN: usize = 63;
 
 /// Prefix of the bytes a membership record's signature covers.
-pub const SIGNATURE_CONTEXT: &[u8] = b"deskhop member record v1";
+pub const SIGNATURE_CONTEXT: &[u8] = b"mouseflock member record v1";
 
 /// `MemberRecord` bytes before the name: kind, subject, epoch, signer, name
 /// length.

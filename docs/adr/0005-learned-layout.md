@@ -15,7 +15,7 @@ A GUI arrangement (drag machines and monitors into place, as Synergy does) solve
 
 ## Decision
 
-- **Learned first.** Layout is learned by use and DeskHop works without the user ever arranging anything.
+- **Learned first.** Layout is learned by use and MouseFlock works without the user ever arranging anything.
 - **Optional arrangement view, post-MVP.** A later UI page shows the learned layout and lets the user correct it by dragging. It edits the same graph learning writes. It is never required, and nothing prompts the user to open it.
 - **Slots per monitor side.** The graph maps each outer side of each monitor to at most one peer. The MVP fills every monitor on one side of the machine at once, so the user only ever answers per machine side; the view can later split them.
 - **Saved per monitor set.** Each set of connected monitors (docked, undocked) keeps its own layout, as Windows display settings do. A new monitor set starts from the sides learned for the previous one.

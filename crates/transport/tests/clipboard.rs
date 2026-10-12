@@ -382,7 +382,7 @@ fn image_transfer(id: u64, png: &[u8]) -> Vec<u8> {
     out
 }
 
-/// A node that advertises only protocol version 1, as DeskHop 0.1.0 does.
+/// A node that advertises only protocol version 1.
 fn old_node(machine: Machine) -> Node {
     let mut c = config(machine);
     c.hello = Hello { min: 1, max: 1 };

@@ -5,7 +5,7 @@
 //! inject F24, so they need a logged-in desktop and never run by default:
 //!
 //! ```text
-//! cargo test -p deskhop-agent -- --ignored --test-threads=1
+//! cargo test -p mouseflock-agent -- --ignored --test-threads=1
 //! ```
 
 use std::process::{Child, Command, ExitStatus};
@@ -19,14 +19,14 @@ use model::{CaptureMode, InputAction, InputEvent, Key, Millis, Origin};
 use tokio::net::windows::named_pipe::ServerOptions;
 use tokio::sync::mpsc::UnboundedReceiver;
 
-const AGENT: &str = env!("CARGO_BIN_EXE_deskhop-agent");
+const AGENT: &str = env!("CARGO_BIN_EXE_mouseflock-agent");
 const F24: Key = Key(0x73);
 const WAIT: Duration = Duration::from_secs(5);
 
 fn pipe_name() -> String {
     static NEXT: AtomicU32 = AtomicU32::new(0);
     format!(
-        r"\\.\pipe\deskhop-test-{}-{}",
+        r"\\.\pipe\mouseflock-test-{}-{}",
         std::process::id(),
         NEXT.fetch_add(1, Ordering::SeqCst)
     )
@@ -191,13 +191,13 @@ async fn clipboard_copy_is_reported_and_set_is_not() {
     // Set-Clipboard goes through the OLE clipboard, which can change the
     // clipboard twice; a slow second change is a second report, and the
     // newest one is the copy.
-    powershell("Set-Clipboard -Value 'deskhop hello'");
-    let want = FromAgent::Clipboard(Copied::Text("deskhop hello".into()));
+    powershell("Set-Clipboard -Value 'mouseflock hello'");
+    let want = FromAgent::Clipboard(Copied::Text("mouseflock hello".into()));
     next_matching(&mut events, |e| *e == want).await;
 
-    handle.set_clipboard("deskhop world").unwrap();
+    handle.set_clipboard("mouseflock world").unwrap();
     let end = Instant::now() + WAIT;
-    while powershell("Get-Clipboard -Raw") != "deskhop world" {
+    while powershell("Get-Clipboard -Raw") != "mouseflock world" {
         assert!(Instant::now() < end, "the agent never set the clipboard");
         std::thread::sleep(Duration::from_millis(50));
     }
@@ -264,7 +264,7 @@ async fn winlogon_ignores_copies() {
     let (mut child, handle, mut events) = linked(AgentRole::Winlogon).await;
     next_matching(&mut events, |e| matches!(e, FromAgent::InputDesktop(_))).await;
 
-    powershell("Set-Clipboard -Value 'deskhop winlogon'");
+    powershell("Set-Clipboard -Value 'mouseflock winlogon'");
     let copy = tokio::time::timeout(Duration::from_millis(600), async {
         loop {
             match events.recv().await {
@@ -370,9 +370,11 @@ async fn corrupt_image_leaves_the_link_up() {
     bad[n / 2] ^= 0xff;
     handle.set_clipboard_image(&bad).unwrap();
     // The link is still up: a later text set still works.
-    handle.set_clipboard("deskhop after a bad image").unwrap();
+    handle
+        .set_clipboard("mouseflock after a bad image")
+        .unwrap();
     let end = Instant::now() + WAIT;
-    while powershell("Get-Clipboard -Raw") != "deskhop after a bad image" {
+    while powershell("Get-Clipboard -Raw") != "mouseflock after a bad image" {
         assert!(Instant::now() < end, "the link went down after a bad image");
         std::thread::sleep(Duration::from_millis(50));
     }

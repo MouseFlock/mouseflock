@@ -2,7 +2,7 @@
 
 ## Why
 
-Text and images copied on one DeskHop machine already paste on another. Files do not: copying files in Explorer and crossing to another PC leaves them behind. Moving a file between paired PCs is one of the most common things people reach for after text, and the brief promises that "the clipboard follows the cursor". This adds files, by copy and paste, the same gesture people already use.
+Text and images copied on one MouseFlock machine already paste on another. Files do not: copying files in Explorer and crossing to another PC leaves them behind. Moving a file between paired PCs is one of the most common things people reach for after text, and the brief promises that "the clipboard follows the cursor". This adds files, by copy and paste, the same gesture people already use.
 
 ## What Changes
 
@@ -47,7 +47,7 @@ Text and images copied on one DeskHop machine already paste on another. Files do
   - **`bin/service`:** the held copy and the tracker gain a file kind carrying the manifest; relay content requests and streams between the receiving and owning members; log file counts and totals, never names or bytes beyond counts.
   - **`tools/fuzz`:** the new decoders and the manifest parser.
   - **No change:** `engine`, `model`, `pairing`, `policy`, `win32-input`, `win32-session`, `win32-shell`, `apps/desktop`, `installer`.
-- **Dependency rules hold:** only `deskhop-agent` links `win32-clipboard`, so the COM file code stays out of the SYSTEM service; `proto` and `ipc` bump their versions and update `docs/protocol.md`; no new dependency in `proto`, `model` or `engine`.
+- **Dependency rules hold:** only `mouseflock-agent` links `win32-clipboard`, so the COM file code stays out of the SYSTEM service; `proto` and `ipc` bump their versions and update `docs/protocol.md`; no new dependency in `proto`, `model` or `engine`.
 - **No grid, no server/client toggle, no IP address field.**
 - **Testing:**
   - unit and transport tests over loopback, including a version 1/2 peer against a version 3 one, and a directory tree;

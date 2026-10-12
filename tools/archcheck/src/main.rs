@@ -1,9 +1,9 @@
 //! Enforces the dependency rules in AGENTS.md against `cargo metadata`.
 //!
 //! 1. `engine` never reaches `win32-*`, `transport`, or `ipc`, directly or not.
-//! 2. Only `deskhop-agent` depends on `win32-input` and `win32-clipboard`, and
-//!    only `deskhop-service` on `win32-session` (ADR 0006), and only
-//!    `deskhop-desktop` on `win32-shell` (ADR 0007).
+//! 2. Only `mouseflock-agent` depends on `win32-input` and `win32-clipboard`, and
+//!    only `mouseflock-service` on `win32-session` (ADR 0006), and only
+//!    `mouseflock-desktop` on `win32-shell` (ADR 0007).
 //! 3. Every lib and bin root except the four `win32-*` crates has
 //!    `#![forbid(unsafe_code)]`.
 //!
@@ -32,10 +32,10 @@ const ENGINE_FORBIDDEN: [&str; 6] = [
 ];
 /// Each `unsafe` crate and the one package allowed to depend on it.
 const ONLY_LINKER: [(&str, &str); 4] = [
-    ("win32-input", "deskhop-agent"),
-    ("win32-clipboard", "deskhop-agent"),
-    ("win32-session", "deskhop-service"),
-    ("win32-shell", "deskhop-desktop"),
+    ("win32-input", "mouseflock-agent"),
+    ("win32-clipboard", "mouseflock-agent"),
+    ("win32-session", "mouseflock-service"),
+    ("win32-shell", "mouseflock-desktop"),
 ];
 
 struct Package {

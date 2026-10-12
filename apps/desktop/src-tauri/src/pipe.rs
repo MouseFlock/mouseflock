@@ -18,8 +18,8 @@ pub async fn connect() -> io::Result<(NamedPipeClient, u32)> {
 /// serving the UI pipe, and both binaries built first:
 ///
 /// ```text
-/// cargo build -p deskhop-service -p deskhop-agent
-/// cargo test -p deskhop-desktop -- --ignored
+/// cargo build -p mouseflock-service -p mouseflock-agent
+/// cargo test -p mouseflock-desktop -- --ignored
 /// ```
 #[cfg(test)]
 mod tests {
@@ -36,18 +36,18 @@ mod tests {
 
     impl Console {
         fn start() -> Self {
-            // target\debug\deps\deskhop_desktop-….exe → target\debug
+            // target\debug\deps\mouseflock_desktop-….exe → target\debug
             let exe = std::env::current_exe().unwrap();
             let service: PathBuf = exe
                 .parent()
                 .and_then(|deps| deps.parent())
                 .unwrap()
-                .join("deskhop-service.exe");
+                .join("mouseflock-service.exe");
             assert!(
                 service.exists(),
-                "run `cargo build -p deskhop-service -p deskhop-agent` first"
+                "run `cargo build -p mouseflock-service -p mouseflock-agent` first"
             );
-            let dir = std::env::temp_dir().join(format!("deskhop-ui-{}", std::process::id()));
+            let dir = std::env::temp_dir().join(format!("mouseflock-ui-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&dir);
             let child = Command::new(service)
                 .args(["--console", "--port", "0", "--data"])

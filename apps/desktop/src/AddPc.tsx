@@ -2,7 +2,7 @@
 import { type FormEvent, useEffect, useRef, useState } from "react";
 import type { CommandError, JoinFailedReason, PairingClosedReason, View } from "./bridge";
 import { NO_NETWORK, countdown, joinFailed, joined, paired, pairingClosed } from "./text";
-import { useBridge, useNotice, useNow } from "./useDeskhop";
+import { useBridge, useNotice, useNow } from "./useMouseFlock";
 
 type Props = { view: View; at: number; onDone: () => void };
 
@@ -14,7 +14,7 @@ export function AddPc({ view, at, onDone }: Props) {
       <h2>Add a PC</h2>
       {mode === "choose" && (
         <>
-          <p>Install DeskHop on the other PC too. Then, on one of the two PCs, show a code, and type it on the other.</p>
+          <p>Install MouseFlock on the other PC too. Then, on one of the two PCs, show a code, and type it on the other.</p>
           <div className="actions">
             <button className="primary" disabled={!view.connected} onClick={() => setMode("show")}>
               Show a code

@@ -15,10 +15,10 @@ Every machine runs the same install with four processes:
 
 | Process | Runs as | Responsibility |
 |---|---|---|
-| `deskhop-service.exe` | Windows service, SYSTEM, session 0 | Transport, pairing keys, trust store, managed configuration, spawning agents |
-| `deskhop-agent.exe --session` | Interactive user session, medium integrity | Low-level hooks, Raw Input, `SendInput`, cursor clip/warp, clipboard |
-| `deskhop-agent.exe --winlogon` | Winlogon (secure) desktop, SYSTEM | Injection into UAC prompts and the lock screen |
-| `DeskHop.exe` | User, on demand | Tauri UI: onboarding, peers, layout, diagnostics |
+| `mouseflock-service.exe` | Windows service, SYSTEM, session 0 | Transport, pairing keys, trust store, managed configuration, spawning agents |
+| `mouseflock-agent.exe --session` | Interactive user session, medium integrity | Low-level hooks, Raw Input, `SendInput`, cursor clip/warp, clipboard |
+| `mouseflock-agent.exe --winlogon` | Winlogon (secure) desktop, SYSTEM | Injection into UAC prompts and the lock screen |
+| `MouseFlock.exe` | User, on demand | Tauri UI: onboarding, peers, layout, diagnostics |
 
 The service spawns agents with `WTSQueryUserToken` + `CreateProcessAsUser`, reacting to session change notifications. All four processes communicate over named pipes using the versioned `ipc` crate. The service never touches input directly; the agents never touch the network.
 

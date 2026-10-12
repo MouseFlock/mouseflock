@@ -96,8 +96,8 @@ export const tauriBridge: Bridge = {
   removePeer: (key) => invoke("remove_peer", { key }),
   undo: () => invoke("undo"),
   forgetLayout: () => invoke("forget_layout"),
-  onView: (f) => on("deskhop://view", f),
-  onNotice: (f) => on("deskhop://notice", f),
-  onNavigate: (f) => on("deskhop://navigate", f),
-  onUndo: (f) => on("deskhop://undo", f),
+  onView: (f) => on("mouseflock://view", f),
+  onNotice: (f) => on("mouseflock://notice", f),
+  onNavigate: (f) => on("mouseflock://navigate", f),
+  onUndo: (f) => on("mouseflock://undo", f),
 };

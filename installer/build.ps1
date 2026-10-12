@@ -1,12 +1,12 @@
 <#
 .SYNOPSIS
-Builds DeskHop's Windows Installer package for one architecture.
+Builds MouseFlock's Windows Installer package for one architecture.
 
 .DESCRIPTION
 From the repository, in any PowerShell (no elevation needed):
 
-    installer\build.ps1 -Arch x64      installer\out\DeskHop-<version>-x64.msi
-    installer\build.ps1 -Arch arm64    installer\out\DeskHop-<version>-arm64.msi
+    installer\build.ps1 -Arch x64      installer\out\MouseFlock-<version>-x64.msi
+    installer\build.ps1 -Arch arm64    installer\out\MouseFlock-<version>-arm64.msi
 
 Steps (add-installer design D2): the tray app with `tauri build`, the service
 and agent with `cargo build --release`, the WebView2 bootstrapper (downloaded
@@ -83,9 +83,9 @@ try {
 
     $metadata = cargo metadata --no-deps --format-version 1 2>$null | ConvertFrom-Json
     if (-not $metadata) { throw 'cargo metadata failed' }
-    if (-not $Version) { $Version = ($metadata.packages | Where-Object name -eq 'deskhop-service').version }
+    if (-not $Version) { $Version = ($metadata.packages | Where-Object name -eq 'mouseflock-service').version }
     $BinDir = Join-Path $metadata.target_directory "$Triple\release"
-    Step "DeskHop $Version for $Arch"
+    Step "MouseFlock $Version for $Arch"
 
     if (-not $PackageOnly) {
         Step 'tray app (tauri build)'
@@ -96,9 +96,9 @@ try {
         } finally { Pop-Location }
 
         Step 'service and agent (cargo build --release)'
-        Invoke 'cargo build' { cargo build --release --locked -p deskhop-service -p deskhop-agent --target $Triple }
+        Invoke 'cargo build' { cargo build --release --locked -p mouseflock-service -p mouseflock-agent --target $Triple }
     }
-    foreach ($bin in 'deskhop-service.exe', 'deskhop-agent.exe', 'DeskHop.exe') {
+    foreach ($bin in 'mouseflock-service.exe', 'mouseflock-agent.exe', 'MouseFlock.exe') {
         if (-not (Test-Path (Join-Path $BinDir $bin))) { throw "$bin is missing from $BinDir" }
     }
 
@@ -116,7 +116,7 @@ try {
     Write-Host "    $WebView2Setup is signed by Microsoft"
 
     Step 'package (dotnet build)'
-    $project = Join-Path $PSScriptRoot 'DeskHop.wixproj'
+    $project = Join-Path $PSScriptRoot 'MouseFlock.wixproj'
     Invoke 'dotnet build' {
         # --no-incremental: every package is linked afresh, with a new product code
         # (D3). Its clean removes what the last build in the same intermediate
@@ -125,17 +125,17 @@ try {
             "-p:IntermediateOutputPath=obj\$Arch$OutputSuffix\" "-p:ProductVersion=$Version" `
             "-p:BinDir=$BinDir" "-p:WebView2Setup=$WebView2Setup" "-p:OutputSuffix=$OutputSuffix"
     }
-    $msi = Join-Path $PSScriptRoot "out\DeskHop-$Version-$Arch$OutputSuffix.msi"
+    $msi = Join-Path $PSScriptRoot "out\MouseFlock-$Version-$Arch$OutputSuffix.msi"
     Step "built $msi"
 
     Step 'setup program (dotnet build)'
-    $bundle = Join-Path $PSScriptRoot 'DeskHopSetup.wixproj'
+    $bundle = Join-Path $PSScriptRoot 'MouseFlockSetup.wixproj'
     Invoke 'dotnet build (setup)' {
         dotnet build $bundle --no-incremental -c Release -nologo -v:minimal "-p:Platform=$Platform" `
             "-p:IntermediateOutputPath=obj\setup-$Arch$OutputSuffix\" "-p:ProductVersion=$Version" `
             "-p:MsiPath=$msi" "-p:OutputSuffix=$OutputSuffix"
     }
-    Step "built $(Join-Path $PSScriptRoot "out\DeskHop-Setup-$Version-$Arch$OutputSuffix.exe")"
+    Step "built $(Join-Path $PSScriptRoot "out\MouseFlock-Setup-$Version-$Arch$OutputSuffix.exe")"
 } finally {
     Pop-Location
 }

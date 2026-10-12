@@ -5,7 +5,7 @@
 pub enum Origin {
     /// A keyboard or mouse attached to this machine.
     Physical,
-    /// Produced by software: DeskHop on a peer's behalf, or anything else.
+    /// Produced by software: MouseFlock on a peer's behalf, or anything else.
     Injected,
 }
 

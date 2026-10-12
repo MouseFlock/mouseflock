@@ -44,7 +44,7 @@ pub fn run(pipe: &str, role: AgentRole) -> ExitCode {
     {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("deskhop-agent: {e}");
+            eprintln!("mouseflock-agent: {e}");
             return ExitCode::FAILURE;
         }
     };
@@ -68,14 +68,14 @@ async fn link(pipe: &str, role: AgentRole) -> ExitCode {
     let stream = match connect(pipe).await {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("deskhop-agent: cannot open {pipe}: {e}");
+            eprintln!("mouseflock-agent: cannot open {pipe}: {e}");
             return ExitCode::from(NO_PIPE);
         }
     };
     let (reports, mut commands) = match AgentEnd::connect(stream, role, win32_input::now).await {
         Ok((reports, commands)) => (Arc::new(reports), commands),
         Err(e) => {
-            eprintln!("deskhop-agent: {e}");
+            eprintln!("mouseflock-agent: {e}");
             return ExitCode::from(NO_HANDSHAKE);
         }
     };
@@ -85,7 +85,7 @@ async fn link(pipe: &str, role: AgentRole) -> ExitCode {
     let (capture, captured) = match win32_input::start(options) {
         Ok(v) => v,
         Err(e) => {
-            eprintln!("deskhop-agent: {e}");
+            eprintln!("mouseflock-agent: {e}");
             return ExitCode::from(NO_CAPTURE);
         }
     };
@@ -100,7 +100,7 @@ async fn link(pipe: &str, role: AgentRole) -> ExitCode {
         AgentRole::Session => match win32_clipboard::start() {
             Ok((clipboard, copied)) => (Some(clipboard), bridge(copied)),
             Err(e) => {
-                eprintln!("deskhop-agent: clipboard unavailable: {e}");
+                eprintln!("mouseflock-agent: clipboard unavailable: {e}");
                 (None, mpsc::unbounded_channel().1)
             }
         },
@@ -184,7 +184,7 @@ fn report_copy(reports: &ServiceHandle, files: &mut Files, copied: Copied) -> Re
         Copied::NoText => NotShared::NoText,
         Copied::TooLarge => NotShared::TooLarge,
         Copied::NotSet(e) => {
-            eprintln!("deskhop-agent: received image not set: {e}");
+            eprintln!("mouseflock-agent: received image not set: {e}");
             return Ok(());
         }
     };
@@ -206,12 +206,12 @@ fn apply(capture: &Capture, cmd: ToAgent) {
         ToAgent::SetCapture(mode) => capture.set_mode(mode),
         ToAgent::Inject(action) => {
             if let Err(e) = capture.inject(action) {
-                eprintln!("deskhop-agent: inject {action:?}: {e}");
+                eprintln!("mouseflock-agent: inject {action:?}: {e}");
             }
         }
         ToAgent::Warp(to) => {
             if let Err(e) = capture.warp(to) {
-                eprintln!("deskhop-agent: warp to {to:?}: {e}");
+                eprintln!("mouseflock-agent: warp to {to:?}: {e}");
             }
         }
         // Answered inside the link; never yielded.

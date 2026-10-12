@@ -1,11 +1,21 @@
-# DeskHop protocols
+# MouseFlock protocols
 
 Two versioned protocols. A change to either bumps its version constant and updates this file in the same PR.
 
 | Protocol | Between | Version constant | Current |
 |---|---|---|---|
-| Peer wire protocol | DeskHop peers on the LAN, over QUIC | `proto::PROTOCOL_VERSION` | 2 (speaks 1–2) |
-| IPC protocol | Service, agents, and UI, over named pipes | `ipc::IPC_VERSION` | 2 (speaks 1–2) |
+| Peer wire protocol | MouseFlock peers on the LAN, over QUIC | `proto::PROTOCOL_VERSION` | 3 (speaks 1–3) |
+| IPC protocol | Service, agents, and UI, over named pipes | `ipc::IPC_VERSION` | 3 (speaks 1–3) |
+
+**Names.** On 2026-10-12 the project was renamed from DeskHop to MouseFlock, and every identifier that carried the name changed with it:
+
+- the mDNS service type and host names
+- the ALPNs and the TLS server name
+- the pairing and membership labels
+- the identity and trust store file magics
+- the pipe names
+
+Neither version constant moved, because there is nothing left to negotiate with. A DeskHop peer offers ALPN `deskhop/1`, which is refused during the TLS handshake, before any `Hello`. A DeskHop UI or agent looks for pipes that no longer exist. Within the new names, every message, field and version is the same as before.
 
 This document is written so that a third party could implement a compatible peer (ADR 0003, ADR 0004).
 
@@ -87,7 +97,7 @@ Hello payload:
 - Protocol errors: a first control-stream frame that is not `Hello`, a second `Hello`, `Hello` on any other stream, `min` = 0, or `min` > `max`.
 - Before the version is agreed, datagrams are dropped, and frames on other streams are held unread until agreement (QUIC does not order data across streams).
 - `Hello` ignores bytes after `max`, so later versions can append fields. The first four bytes never change.
-- This release sends `min` 1 and `max` 3 (`01 00 03 00`). With a peer that speaks only version 1, such as DeskHop 0.1.0, the connection agrees version 1 and behaves exactly as between two version 1 releases; with one that speaks up to version 2, it agrees version 2 and shares text and images but no files.
+- This release sends `min` 1 and `max` 3 (`01 00 03 00`). With a peer that speaks only version 1, the connection agrees version 1 and behaves exactly as between two version 1 releases; with one that speaks up to version 2, it agrees version 2 and shares text and images but no files.
 
 ### Transport
 
@@ -99,14 +109,14 @@ Normative requirements: `openspec/specs/peer-transport/spec.md` and `openspec/sp
 
 - *Certificates:* each side presents a self-signed X.509 certificate, in both directions, whose SubjectPublicKeyInfo is exactly the 44-byte RFC 8410 Ed25519 encoding `30 2a 30 05 06 03 2b 65 70 03 21 00` followed by the 32-byte key. That key is the machine's peer identity. Names, validity dates, extensions, and the issuer are ignored. The handshake signature proves possession of the key.
 - *Pinning:* a dialer reaching a member accepts only that member's key. A dialer that is pairing accepts any key and uses it as the inviter's identity. A listener accepts any Ed25519 key during the handshake and decides afterwards.
-- *Server name:* dialers send `deskhop`, and it is ignored.
+- *Server name:* dialers send `mouseflock`, and it is ignored.
 
 **ALPN.**
 
 | ALPN | Connection | After `Hello` |
 |---|---|---|
-| `deskhop/1` | Member | The record exchange below |
-| `deskhop-pair/1` | Pairing | The pairing exchange ([Pairing](#pairing)) |
+| `mouseflock/1` | Member | The record exchange below |
+| `mouseflock-pair/1` | Pairing | The pairing exchange ([Pairing](#pairing)) |
 
 Any other ALPN fails the handshake.
 
@@ -130,7 +140,7 @@ A removed member's connection receives the removal, then a close with code `5`.
 
 **Strangers.** A connection from a key that is not a member must send `PairPake` (pairing) or finish introducing itself (member) within 10 s. At most 8 such connections are held at once, and more are closed at once: with `4` on pairing connections and `5` on member connections.
 
-**mDNS (DNS-SD).** Each machine advertises service type `_deskhop._udp.local.`:
+**mDNS (DNS-SD).** Each machine advertises service type `_mouseflock._udp.local.`:
 
 | Field | Value |
 |---|---|
@@ -165,7 +175,7 @@ The *inviter* shows a code; on the *joiner*, the user types it. The code authent
 
 **SPAKE2.** Symmetric mode over the Ed25519 group, compatible with python-spake2's `SPAKE2_Symmetric` and the `spake2` Rust crate:
 
-- *Password* `pw`: the UTF-8 bytes of the code's canonical text. *Identity* `id`: the ASCII bytes `deskhop pair v1`.
+- *Password* `pw`: the UTF-8 bytes of the code's canonical text. *Identity* `id`: the ASCII bytes `mouseflock pair v1`.
 - *Password scalar:* HKDF-SHA256 with an empty salt, `pw` as input key material, and info `SPAKE2 pw`, expanded to 48 bytes. Read those bytes as a big-endian integer and reduce it modulo the group order.
 - *Constant S:* the point whose compressed encoding is `6f00dae87c1be1a73b5922ef431cd8f57879569c222d22b1cd71e8546ab8e6f1`.
 - *Message:* `0x53` (`S`), then the compressed point `x·B + pw_scalar·S`, for a random scalar `x`. 33 bytes.
@@ -175,13 +185,13 @@ The *inviter* shows a code; on the *joiner*, the user types it. The code authent
 **Key confirmation.**
 
 ```
-PRK     = HKDF-Extract(salt = "deskhop pair v1", IKM = shared key)        (SHA-256)
+PRK     = HKDF-Extract(salt = "mouseflock pair v1", IKM = shared key)        (SHA-256)
 binding = exporter ‖ inviter certificate key ‖ joiner certificate key     (32 + 32 + 32 bytes)
 tag_J   = HKDF-Expand(PRK, "joiner"  ‖ binding, 32)
 tag_I   = HKDF-Expand(PRK, "inviter" ‖ binding, 32)
 ```
 
-`exporter` is the TLS exporter value with label `EXPORTER-deskhop-pair-v1`, an empty context, and a length of 32. Tags are compared in constant time.
+`exporter` is the TLS exporter value with label `EXPORTER-mouseflock-pair-v1`, an empty context, and a length of 32. Tags are compared in constant time.
 
 **Order**, after `Hello`:
 
@@ -228,7 +238,7 @@ MemberRecord payload (138 + n bytes):
 +---------+------------------+------------+------------------+---------+------------+-------------------+
 ```
 
-- *Signature:* covers the ASCII bytes `deskhop member record v1`, followed by the payload without its last 64 bytes. An addition whose signer is its own subject is invalid.
+- *Signature:* covers the ASCII bytes `mouseflock member record v1`, followed by the payload without its last 64 bytes. An addition whose signer is its own subject is invalid.
 - *Which record wins:* for each subject, the record with the highest epoch wins; on equal epochs, removal wins. A machine holds records for at most 256 subjects.
 - *Epoch:* the signer's Unix time in seconds, or one above the highest epoch it holds for that subject if that is greater, and at least 1.
 - *Exchange:* on every connection between members, and at the end of pairing, each side sends every winning record it holds, then `RecordsDone` (an empty payload). A receiver applies the records when `RecordsDone` arrives, retrying records whose signer becomes a member partway through.
@@ -453,7 +463,7 @@ Limits: at most 32 monitors; `id_len` from 1 to 256; `w` and `h` at least 1; `x 
 
 ### Agent link behavior
 
-- The service starts the session agent as `deskhop-agent.exe --session --pipe <name>` and the winlogon agent as `deskhop-agent.exe --winlogon --pipe <name>`. The agent connects, exchanges `Hello` with its role, and only then starts capturing input.
+- The service starts the session agent as `mouseflock-agent.exe --session --pipe <name>` and the winlogon agent as `mouseflock-agent.exe --winlogon --pipe <name>`. The agent connects, exchanges `Hello` with its role, and only then starts capturing input.
 - The winlogon agent sends `InputDesktop` right after its first `Screen`, and again within 100 ms of each change. It never watches or sets the clipboard.
 - The agent exits with code `3` if it cannot open the pipe, `4` if the handshake fails, and `5` if capture cannot start.
 - When the link ends for any reason, the agent returns capture to pass all, removes its hooks, and exits.
@@ -461,7 +471,7 @@ Limits: at most 32 monitors; `id_len` from 1 to 256; `w` and `h` at least 1; `x 
 
 ### UI link
 
-The UI connects to `\\.\pipe\deskhop-ui`, which the service creates at start as the first instance of that name. The pipe refuses remote clients and serves at most 8 UIs at once. Its ACL admits SYSTEM and interactive users. In console mode it admits only the user running console mode.
+The UI connects to `\\.\pipe\mouseflock-ui`, which the service creates at start as the first instance of that name. The pipe refuses remote clients and serves at most 8 UIs at once. Its ACL admits SYSTEM and interactive users. In console mode it admits only the user running console mode.
 
 **Fields:**
 - *key:* a machine's 32-byte Ed25519 public key.
@@ -509,7 +519,7 @@ Any other value, a name or code outside its limits, or more than 256 members is 
 |---|---|---|
 | Peer | 1 | Stream frames, datagrams, message-type registry, `Hello` version negotiation, close reasons, pairing (`PairPake`, `PairConfirm`), desk membership (`MemberRecord`, `RecordsDone`), transport (port 47391, identity certificates, ALPNs, control stream, member connections, one connection per pair, liveness, mDNS), close reason `5`, engine messages (`0x0006`–`0x000F`), `Motion` datagrams (`0x0010`), and the clipboard (`0x0011`–`0x0014`, clipboard streams). Version 1 has not shipped, so these are added without a version bump. |
 | IPC | 1 | Frames, `Hello` with roles and version negotiation, the message registry with directions, and the agent link (input and screen reports, `SetCapture`, injection, warp, `Ping`/`Pong` clock alignment), and clipboard runs (`0x0016`–`0x0018`, `0x0027`–`0x0028`), and the winlogon agent (`InputDesktop`, `0x0019`, and the messages allowed per agent role). The UI link (`0x0030`–`0x003D`: pairing, join, remove, undo, forget layout, `Status` and notices), with directions per link. Version 1 has not shipped, so these fill it in without a version bump. |
-| Peer | 2 | `ClipboardImageData` (`0x0015`): a clipboard stream carrying an image as one PNG, up to 33,554,432 bytes, offered only on connections at version 2. Version 1 shipped with DeskHop 0.1.0, so images get a new version; this release still speaks version 1 with older peers, text only. |
+| Peer | 2 | `ClipboardImageData` (`0x0015`): a clipboard stream carrying an image as one PNG, up to 33,554,432 bytes, offered only on connections at version 2. Version 1 was already in use when images were added, so images get a new version; this release still speaks version 1 with older peers, text only. |
 | IPC | 2 | Image runs: `ClipboardImage` (`0x001A`) and `SetClipboardImage` (`0x0029`), sharing the chunk messages; reason `1` reads "no text or image" and `2` "too large". A link at version 1, as with an agent mid-upgrade, carries text only. |
 | Peer | 3 | File copies: `ClipboardFilesData` (`0x0016`, a manifest on a clipboard stream), `FileContentRequest` (`0x0017`, control stream) and `FileContentData` (`0x0018`, one file's contents on a clipboard stream, `u64` length). Two lanes: a peer may open a copy stream and a file content stream at once. Files are offered only on connections at version 3; this release speaks versions 1 and 2 with older peers, without files. |
 | IPC | 3 | File messages (`0x0040`–`0x004E`): manifest runs with copy and set numbers, `u64` file runs with their own chunks, abandoning a run, and the 1 MiB window with its acknowledgements. Reason `1` reads "no text, image or files". A link at version 2 carries text and images only. |

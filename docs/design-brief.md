@@ -1,4 +1,4 @@
-# DeskHop — Design Brief
+# MouseFlock — Design Brief
 
 *Status: settled direction as of 2026-09-27. Decisions are recorded in `docs/adr/`. Behavior is specified in `openspec/`.*
 
@@ -31,7 +31,7 @@ Rust throughout: service, agents, engine, and the Tauri bridge. React + TypeScri
 
 ## Open source
 
-Apache-2.0. The client is complete on its own: no account, no server, no cloud. The DeskHop name and mark are trademarked. For software that injects keystrokes over the network, an auditable client is the point; `unsafe` is confined to four crates, and `proto`, `model`, and `engine` are kept dependency-light as the audit surface.
+Apache-2.0. The client is complete on its own: no account, no server, no cloud. For software that injects keystrokes over the network, an auditable client is the point; `unsafe` is confined to four crates, and `proto`, `model`, and `engine` are kept dependency-light as the audit surface.
 
 ## MVP
 

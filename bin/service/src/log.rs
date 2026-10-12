@@ -209,7 +209,7 @@ mod tests {
 
     #[test]
     fn rotation_keeps_one_old_file() {
-        let dir = std::env::temp_dir().join(format!("deskhop-log-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("mouseflock-log-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("service.log");
@@ -241,7 +241,7 @@ mod tests {
                 .open(path)
                 .map(drop)
         }
-        let dir = std::env::temp_dir().join(format!("deskhop-loghook-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("mouseflock-loghook-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let log = Log::file_with_max(&dir.join("service.log"), 50, Some(create)).unwrap();

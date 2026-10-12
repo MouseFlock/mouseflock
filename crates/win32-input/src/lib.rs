@@ -27,7 +27,7 @@
 //!
 //! Keys, buttons and wheel take their origin from the hooks' injected flags.
 //! Motion comes from Raw Input, before pointer speed: input carrying
-//! DeskHop's tag ([`decide::TAG`]) is injected, input with a device handle
+//! MouseFlock's tag ([`decide::TAG`]) is injected, input with a device handle
 //! is physical, and anything else follows the last move the mouse hook saw.
 
 mod capture;

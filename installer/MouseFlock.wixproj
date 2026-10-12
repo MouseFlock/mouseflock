@@ -1,5 +1,5 @@
 <!--
-  DeskHop's Windows Installer package (add-installer design D1). Build it with
+  MouseFlock's Windows Installer package (add-installer design D1). Build it with
   installer\build.ps1, which builds the programs first and passes:
 
     ProductVersion  the workspace version, such as 0.1.0
@@ -12,7 +12,7 @@
     <ProductVersion Condition="'$(ProductVersion)' == ''">0.0.0</ProductVersion>
     <ArchName Condition="'$(Platform)' == 'ARM64'">arm64</ArchName>
     <ArchName Condition="'$(ArchName)' == ''">x64</ArchName>
-    <OutputName>DeskHop-$(ProductVersion)-$(ArchName)$(OutputSuffix)</OutputName>
+    <OutputName>MouseFlock-$(ProductVersion)-$(ArchName)$(OutputSuffix)</OutputName>
     <OutputPath>out\</OutputPath>
     <!--
       ICE61 warns that a same-version package replaces the installed one, which
@@ -26,7 +26,7 @@
     <DefineConstants>ProductVersion=$(ProductVersion);ProductCode=$(ProductCode);BinDir=$(BinDir);WebView2Setup=$(WebView2Setup);Icon=$(MSBuildThisFileDirectory)..\apps\desktop\src-tauri\icons\icon.ico</DefineConstants>
   </PropertyGroup>
   <PropertyGroup>
-    <!-- Named below: Bundle.wxs in this folder belongs to DeskHopSetup.wixproj. -->
+    <!-- Named below: Bundle.wxs in this folder belongs to MouseFlockSetup.wixproj. -->
     <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
   </PropertyGroup>
   <ItemGroup>

@@ -39,7 +39,7 @@
 
 - [x] 5.1 Read `CF_HDROP` on copy and walk each path into a manifest (relative paths, directories, sizes), with the ceilings; report it only when there is no shareable text or image (D1, D2). Verify unit tests of the walk (a tree with an empty subfolder; the ceilings; a path over 259 UTF-16 units makes the copy not shared) and an ignored desktop test: copying files is reported as a manifest, not text or an image.
 - [x] 5.2 Build the real delayed data object from a received manifest (from the 1.x spike), on a files thread of its own (D3), serving each file's `CFSTR_FILECONTENTS` `IStream` from bytes the link supplies, and serving source-file bytes on request (D3, D4). Keep the descriptor build and path handling as pure, tested functions. Verify: unit tests of the `FILEGROUPDESCRIPTORW` built from a manifest; ignored desktop tests that an offered file pastes, and that a source file is served; clippy clean and every `unsafe` block has a `// SAFETY:` comment.
-- [x] 5.3 In `deskhop-agent`, report file copies on version 3 links (and as not-shared on older links), serve requested source files, place the data object on a set manifest, and request file contents on paste. A corrupt or rejected manifest leaves the clipboard unchanged and the link up. Verify agent link tests over a pipe pair: a file copy reaches the service end as a manifest at version 3 and as not-shared at version 2; a served file round-trips; a bad manifest keeps the link up.
+- [x] 5.3 In `mouseflock-agent`, report file copies on version 3 links (and as not-shared on older links), serve requested source files, place the data object on a set manifest, and request file contents on paste. A corrupt or rejected manifest leaves the clipboard unchanged and the link up. Verify agent link tests over a pipe pair: a file copy reaches the service end as a manifest at version 3 and as not-shared at version 2; a served file round-trips; a bad manifest keeps the link up.
 
 ## 6. The service (`bin/service`)
 
@@ -62,4 +62,6 @@
   - copy a folder with subfolders (including an empty one) and paste — the tree is recreated;
   - copy a multi-gigabyte file and paste — it transfers with Explorer's progress and no lag in typing meanwhile;
   - with one PC on an older version, files are not offered and text/images still cross.
+
+  Paused for `rename-to-mouseflock` (2026-10-12), with 7.2, 8.1, 8.2 and 8.3 still open. After the rename, the upgrade here runs MouseFlock to MouseFlock: two MouseFlock builds of different versions. An upgrade from a MouseFlock install no longer keeps pairing, by design. The "older version" check needs a MouseFlock build that speaks protocol version 2 or lower. No released build does, because MouseFlock builds can no longer connect, so it is covered by `crates/transport/tests/files.rs` (`a_version_2_peer_never_sees_files`) unless a build is made for it.
 - [ ] 8.3 Repeat 8.2's single-file and folder checks on Windows 10 22H2, deferred with the other two-PC checks if no machine is available.

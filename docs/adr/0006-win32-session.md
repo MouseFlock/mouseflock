@@ -19,7 +19,7 @@ All of these are `unsafe` calls. AGENTS.md rule 3 confines `unsafe` to `win32-in
 ## Decision
 
 - **A third `unsafe` crate, `crates/win32-session`.** It wraps each call above in a small safe function. Every `unsafe` block carries a `// SAFETY:` comment, as in the other two.
-- **Linked only by `bin/service`.** `bin/service` keeps `#![forbid(unsafe_code)]`. `cargo archcheck` enforces both rules: `unsafe` is allowed in `win32-session`, and only `deskhop-service` may depend on it.
+- **Linked only by `bin/service`.** `bin/service` keeps `#![forbid(unsafe_code)]`. `cargo archcheck` enforces both rules: `unsafe` is allowed in `win32-session`, and only `mouseflock-service` may depend on it.
 - **No input.** `win32-session` has no hooks, no `SendInput` and no clipboard. The service still never touches input; `SendSAS` asks Windows to show its secure attention screen and injects nothing.
 - **One launch function.** Launching into a session goes through one function in `bin/service`, which is the only caller of `win32-session`'s launch call.
 

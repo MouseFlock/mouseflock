@@ -885,54 +885,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "deskhop-agent"
-version = "0.1.0"
-dependencies = [
- "ipc",
- "model",
- "png 0.18.1",
- "proto",
- "tokio",
- "win32-clipboard",
- "win32-input",
-]
-
-[[package]]
-name = "deskhop-desktop"
-version = "0.1.0"
-dependencies = [
- "ipc",
- "model",
- "serde",
- "serde_json",
- "tauri",
- "tauri-build",
- "tauri-plugin-autostart",
- "tauri-plugin-single-instance",
- "tokio",
- "win32-shell",
-]
-
-[[package]]
-name = "deskhop-service"
-version = "0.1.0"
-dependencies = [
- "engine",
- "ipc",
- "model",
- "pairing",
- "policy",
- "proto",
- "rand_core 0.6.4",
- "serde",
- "serde_json",
- "tokio",
- "transport",
- "win32-session",
- "windows-service",
-]
-
-[[package]]
 name = "digest"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2387,6 +2339,54 @@ dependencies = [
 [[package]]
 name = "model"
 version = "0.1.0"
+
+[[package]]
+name = "mouseflock-agent"
+version = "0.1.0"
+dependencies = [
+ "ipc",
+ "model",
+ "png 0.18.1",
+ "proto",
+ "tokio",
+ "win32-clipboard",
+ "win32-input",
+]
+
+[[package]]
+name = "mouseflock-desktop"
+version = "0.1.0"
+dependencies = [
+ "ipc",
+ "model",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-autostart",
+ "tauri-plugin-single-instance",
+ "tokio",
+ "win32-shell",
+]
+
+[[package]]
+name = "mouseflock-service"
+version = "0.1.0"
+dependencies = [
+ "engine",
+ "ipc",
+ "model",
+ "pairing",
+ "policy",
+ "proto",
+ "rand_core 0.6.4",
+ "serde",
+ "serde_json",
+ "tokio",
+ "transport",
+ "win32-session",
+ "windows-service",
+]
 
 [[package]]
 name = "muda"

@@ -282,7 +282,7 @@ impl Formats {
             descriptor: id(CFSTR_FILEDESCRIPTORW),
             contents: id(CFSTR_FILECONTENTS),
             effect: id(CFSTR_PREFERREDDROPEFFECT),
-            own: id(w!("DeskHopFiles")),
+            own: id(w!("MouseFlockFiles")),
         }
     }
 }
@@ -633,7 +633,7 @@ impl IStream_Impl for Content_Impl {
     }
 }
 
-/// The `deskhop-files` thread (D3): an OLE apartment of its own, pumping
+/// The `mouseflock-files` thread (D3): an OLE apartment of its own, pumping
 /// messages, that places offered files on the clipboard. A file manager's
 /// calls on the data object, each file's `Read` included, arrive on this
 /// thread, so a read waiting for bytes from another machine never holds up
@@ -659,7 +659,7 @@ impl Offerer {
         let (offers, rx) = mpsc::channel();
         let (ready_tx, ready) = mpsc::sync_channel(1);
         let handle = std::thread::Builder::new()
-            .name("deskhop-files".into())
+            .name("mouseflock-files".into())
             .spawn(move || offer_thread(&rx, &ready_tx))
             .map_err(windows_core::Error::from)?;
         match ready.recv() {
@@ -847,7 +847,7 @@ mod tests {
 
     /// A fresh, empty folder under the temp folder.
     fn scratch(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("deskhop-walk-{name}"));
+        let dir = std::env::temp_dir().join(format!("mouseflock-walk-{name}"));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir
@@ -914,7 +914,7 @@ mod tests {
         );
         // The root's own name counts toward a path's length.
         let short = Limits {
-            path_units: "deskhop-walk-limits/f0".len() - 1,
+            path_units: "mouseflock-walk-limits/f0".len() - 1,
             ..LIMITS
         };
         assert_eq!(walk(&[root], short), Err(WalkError::TooLarge));
@@ -931,7 +931,7 @@ mod tests {
     #[test]
     fn walk_of_nothing_or_missing_is_not_shared() {
         assert_eq!(walk(&[], LIMITS), Err(WalkError::Empty));
-        let gone = std::env::temp_dir().join("deskhop-walk-missing-xyz");
+        let gone = std::env::temp_dir().join("mouseflock-walk-missing-xyz");
         let _ = fs::remove_dir_all(&gone);
         assert_eq!(walk(&[gone], LIMITS), Err(WalkError::Unreadable));
     }
@@ -1052,22 +1052,22 @@ mod desktop {
     fn spike_entries(big: u64) -> Vec<Entry> {
         vec![
             Entry {
-                path: "DeskHop spike".into(),
+                path: "MouseFlock spike".into(),
                 is_dir: true,
                 size: 0,
             },
             Entry {
-                path: "DeskHop spike/hello.txt".into(),
+                path: "MouseFlock spike/hello.txt".into(),
                 is_dir: false,
                 size: 20,
             },
             Entry {
-                path: "DeskHop spike/empty".into(),
+                path: "MouseFlock spike/empty".into(),
                 is_dir: true,
                 size: 0,
             },
             Entry {
-                path: "DeskHop spike/sub/big.bin".into(),
+                path: "MouseFlock spike/sub/big.bin".into(),
                 is_dir: false,
                 size: big,
             },
@@ -1245,7 +1245,7 @@ mod desktop {
             unsafe { OleInitialize(None) }.unwrap();
             data_object(entries, source.clone()).unwrap()
         };
-        let target = fresh_dir("deskhop-spike-drop");
+        let target = fresh_dir("mouseflock-spike-drop");
         // SAFETY: COM is initialized; the path is a valid string, and the
         // object and effect live for the calls.
         unsafe {
@@ -1268,7 +1268,7 @@ mod desktop {
             pump(Duration::from_millis(50));
         }
         pump(Duration::from_secs(2));
-        let root = target.join("DeskHop spike");
+        let root = target.join("MouseFlock spike");
         check_file(&root.join("hello.txt"), 1, 20);
         check_file(&root.join("sub").join("big.bin"), 3, big);
         assert!(root.join("empty").is_dir(), "empty folder not created");
@@ -1324,8 +1324,8 @@ mod desktop {
         unsafe { OleInitialize(None) }.unwrap();
         // SAFETY: OLE is initialized on this thread.
         let object = unsafe { OleGetClipboard() }.unwrap();
-        let root =
-            paste_into(&object, &source, big + 20, "deskhop-offered-paste").join("DeskHop spike");
+        let root = paste_into(&object, &source, big + 20, "mouseflock-offered-paste")
+            .join("MouseFlock spike");
         check_file(&root.join("hello.txt"), 1, 20);
         check_file(&root.join("sub").join("big.bin"), 3, big);
         assert!(root.join("empty").is_dir(), "empty folder not created");
@@ -1337,7 +1337,7 @@ mod desktop {
     }
 
     /// By hand: places a slowed 256 MiB file and a small tree on the
-    /// clipboard for 10 minutes. Paste it into `%TEMP%\deskhop-spike-paste`
+    /// clipboard for 10 minutes. Paste it into `%TEMP%\mouseflock-spike-paste`
     /// in Explorer (Ctrl+V); Explorer's progress dialog should show. The
     /// test then checks what landed there.
     #[test]
@@ -1346,14 +1346,14 @@ mod desktop {
         let big = 256 * MIB;
         let entries = spike_entries(big);
         let source = pattern(&entries, Some(32 * MIB));
-        let target = fresh_dir("deskhop-spike-paste");
+        let target = fresh_dir("mouseflock-spike-paste");
         let owner = own(entries, source.clone());
         eprintln!(
             "On the clipboard now. In Explorer, open {} and press Ctrl+V.",
             target.display()
         );
         let deadline = Instant::now() + Duration::from_secs(600);
-        let root = target.join("DeskHop spike");
+        let root = target.join("MouseFlock spike");
         while source.read.load(Ordering::Relaxed) < big + 20 {
             assert!(Instant::now() < deadline, "nothing was pasted in time");
             std::thread::sleep(Duration::from_millis(250));

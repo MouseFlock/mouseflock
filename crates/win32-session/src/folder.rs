@@ -268,7 +268,7 @@ mod tests {
 
     #[test]
     fn admin_readable_file_is_created_once() {
-        let dir = std::env::temp_dir().join(format!("deskhop-logacl-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("mouseflock-logacl-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("service.log");
         let _ = std::fs::remove_file(&path);
@@ -281,14 +281,15 @@ mod tests {
 
     #[test]
     fn aside_name_keeps_the_folder_name() {
-        let moved = aside(Path::new(r"C:\ProgramData\DeskHop"));
+        let moved = aside(Path::new(r"C:\ProgramData\MouseFlock"));
         let name = moved.file_name().unwrap().to_string_lossy().into_owned();
-        assert!(name.starts_with("DeskHop.untrusted-"), "{name}");
+        assert!(name.starts_with("MouseFlock.untrusted-"), "{name}");
         assert_eq!(moved.parent(), Some(Path::new(r"C:\ProgramData")));
     }
 
     fn temp(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("deskhop-remove-{tag}-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("mouseflock-remove-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         dir
     }
@@ -303,7 +304,7 @@ mod tests {
     fn a_junction_is_refused_and_its_target_kept() {
         let base = temp("junction");
         let target = base.join("target");
-        let link = base.join("DeskHop");
+        let link = base.join("MouseFlock");
         std::fs::create_dir_all(&target).unwrap();
         std::fs::write(target.join("keep.txt"), b"keep").unwrap();
         // Junctions need no privilege, unlike symbolic links.
@@ -331,7 +332,7 @@ mod tests {
     fn a_file_is_refused() {
         let base = temp("file");
         std::fs::create_dir_all(&base).unwrap();
-        let file = base.join("DeskHop");
+        let file = base.join("MouseFlock");
         std::fs::write(&file, b"x").unwrap();
         let removal = remove_secure_folder(&file).unwrap();
         assert!(matches!(removal, Removal::Refused(_)), "{removal:?}");
@@ -361,7 +362,7 @@ mod tests {
 
     #[test]
     fn owner_of_a_file_this_user_created_is_this_user() {
-        let dir = std::env::temp_dir().join(format!("deskhop-owner-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("mouseflock-owner-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let me = crate::own_sid().unwrap();
         let found = owner(&dir).unwrap();

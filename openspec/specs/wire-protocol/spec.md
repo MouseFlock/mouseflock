@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Defines the envelope of the DeskHop peer wire protocol: how bytes on QUIC streams and datagrams become messages, how peers agree on a protocol version, and how decoding stays safe on untrusted input. Every other peer-to-peer capability carries its messages inside this envelope.
+Defines the envelope of the MouseFlock peer wire protocol: how bytes on QUIC streams and datagrams become messages, how peers agree on a protocol version, and how decoding stays safe on untrusted input. Every other peer-to-peer capability carries its messages inside this envelope.
 
 ## Requirements
 

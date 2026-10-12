@@ -108,7 +108,7 @@ impl Files {
     /// leaves the clipboard as it was.
     pub fn set(&self, set: u32, manifest: &[u8], clipboard: Option<&Clipboard>) {
         let Ok(parsed) = Manifest::parse(manifest) else {
-            eprintln!("deskhop-agent: received file copy refused");
+            eprintln!("mouseflock-agent: received file copy refused");
             return;
         };
         let entries: Vec<Entry> = parsed
@@ -126,7 +126,7 @@ impl Files {
             incoming: self.incoming.clone(),
         });
         if !clipboard.is_some_and(|c| c.set_files(entries, source)) {
-            eprintln!("deskhop-agent: files cannot be offered on this desktop");
+            eprintln!("mouseflock-agent: files cannot be offered on this desktop");
         }
     }
 
@@ -571,7 +571,7 @@ mod tests {
     async fn a_requested_file_is_served_within_the_window() {
         let (handle, mut events, reports, mut commands) = linked().await;
         let (mut files, mut served) = Files::new(Arc::new(reports));
-        let dir = std::env::temp_dir().join("deskhop-agent-serve");
+        let dir = std::env::temp_dir().join("mouseflock-agent-serve");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let body: Vec<u8> = (0..3 * FILE_WINDOW as usize + 5).map(|i| i as u8).collect();
@@ -621,7 +621,7 @@ mod tests {
     async fn a_file_that_shrank_is_abandoned() {
         let (handle, mut events, reports, mut commands) = linked().await;
         let (mut files, mut served) = Files::new(Arc::new(reports));
-        let file = std::env::temp_dir().join("deskhop-agent-shrunk.bin");
+        let file = std::env::temp_dir().join("mouseflock-agent-shrunk.bin");
         std::fs::write(&file, [1; 10]).unwrap();
         files
             .report(FileCopy {

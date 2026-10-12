@@ -265,16 +265,16 @@ pub fn notice(event: &UiEvent, latest: Option<&Status>) -> Option<Notice> {
 /// The tray tooltip for `view`, at most 127 UTF-16 units.
 pub fn tooltip(view: &View) -> String {
     let text = match &view.status {
-        None => "DeskHop: service isn't running".to_owned(),
+        None => "MouseFlock: service isn't running".to_owned(),
         Some(s) => match &s.focus {
-            FocusView::On { name, .. } => format!("DeskHop: controlling {name}"),
-            FocusView::ControlledBy { name, .. } => format!("DeskHop: controlled by {name}"),
-            FocusView::Local if s.members.is_empty() => "DeskHop: no other PCs yet".to_owned(),
+            FocusView::On { name, .. } => format!("MouseFlock: controlling {name}"),
+            FocusView::ControlledBy { name, .. } => format!("MouseFlock: controlled by {name}"),
+            FocusView::Local if s.members.is_empty() => "MouseFlock: no other PCs yet".to_owned(),
             FocusView::Local => {
                 let up = s.members.iter().filter(|m| m.up).count();
                 let all = s.members.len();
                 let pcs = if all == 1 { "PC" } else { "PCs" };
-                format!("DeskHop: {up} of {all} {pcs} connected")
+                format!("MouseFlock: {up} of {all} {pcs} connected")
             }
         },
     };
@@ -483,12 +483,12 @@ mod tests {
     fn tooltips() {
         assert_eq!(
             tooltip(&View::disconnected()),
-            "DeskHop: service isn't running"
+            "MouseFlock: service isn't running"
         );
         let none = status(vec![], FocusOf::Local);
         assert_eq!(
             tooltip(&View::connected(&none)),
-            "DeskHop: no other PCs yet"
+            "MouseFlock: no other PCs yet"
         );
         let some = status(
             vec![member(2, "OFFICE", true), member(3, "LAPTOP", false)],
@@ -496,17 +496,17 @@ mod tests {
         );
         assert_eq!(
             tooltip(&View::connected(&some)),
-            "DeskHop: 1 of 2 PCs connected"
+            "MouseFlock: 1 of 2 PCs connected"
         );
         let one = status(vec![member(2, "OFFICE", true)], FocusOf::Local);
         assert_eq!(
             tooltip(&View::connected(&one)),
-            "DeskHop: 1 of 1 PC connected"
+            "MouseFlock: 1 of 1 PC connected"
         );
         let on = status(vec![member(2, "OFFICE", true)], FocusOf::On(key(2)));
         assert_eq!(
             tooltip(&View::connected(&on)),
-            "DeskHop: controlling OFFICE"
+            "MouseFlock: controlling OFFICE"
         );
         let by = status(
             vec![member(2, "OFFICE", true)],
@@ -514,7 +514,7 @@ mod tests {
         );
         assert_eq!(
             tooltip(&View::connected(&by)),
-            "DeskHop: controlled by OFFICE"
+            "MouseFlock: controlled by OFFICE"
         );
     }
 

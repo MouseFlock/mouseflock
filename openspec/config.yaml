@@ -1,7 +1,7 @@
 schema: spec-driven
 
 context: |
-  DeskHop: zero-configuration software KVM for Windows 10 22H2 and 11, x64 and ARM64.
+  MouseFlock: zero-configuration software KVM for Windows 10 22H2 and 11, x64 and ARM64.
   Read AGENTS.md (stack, repo layout, dependency rules), docs/design-brief.md,
   and docs/adr/. Accepted ADRs are settled; a proposal that contradicts one
   proposes a new ADR instead of working around it.
