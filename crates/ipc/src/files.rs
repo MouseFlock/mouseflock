@@ -114,11 +114,9 @@ impl Window {
 
     /// Counts `n` bytes acknowledged.
     pub fn acknowledge(&self, n: u32) {
-        let _ = self
-            .0
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |v| {
-                Some(v.saturating_sub(u64::from(n)))
-            });
+        let _ = self.0.try_update(Ordering::AcqRel, Ordering::Acquire, |v| {
+            Some(v.saturating_sub(u64::from(n)))
+        });
     }
 
     /// Bytes received and not yet acknowledged.
