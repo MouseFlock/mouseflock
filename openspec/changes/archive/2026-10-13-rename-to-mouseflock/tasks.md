@@ -68,5 +68,5 @@
 ## 6. Land it
 
 - [x] 6.1 Commit as `chore(repo): rename DeskHop to MouseFlock`. Open the PR from `chore/rename-to-mouseflock`, noting the agent and model used and listing the migration steps for anyone with a DeskHop install. Opened as https://github.com/mouseflock/mouseflock/pull/40.
-- [ ] 6.2 After merge, archive this change. In the same archive commit, rename two scenario headings in the main specs directly; a MODIFIED delta cannot rename a scenario. In `input-capture`, "DeskHop's own injection" becomes "MouseFlock's own injection". In `clipboard`, "Member running 0.1.0" becomes "Member that speaks only version 1". Re-run the 5.1 grep gate: only the `docs/protocol.md` "Names" note remains.
+- [x] 6.2 After merge, archive this change. In the same archive commit, rename two scenario headings in the main specs directly; a MODIFIED delta cannot rename a scenario. In `input-capture`, "DeskHop's own injection" becomes "MouseFlock's own injection". In `clipboard`, "Member running 0.1.0" becomes "Member that speaks only version 1". Re-run the 5.1 grep gate: only the `docs/protocol.md` "Names" note remains.
 - [ ] 6.3 Resume `add-clipboard-files` at tasks 7.2 and 8.1–8.3.
