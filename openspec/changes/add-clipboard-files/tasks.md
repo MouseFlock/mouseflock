@@ -53,9 +53,11 @@
 
 ## 8. Integration
 
-- [ ] 8.1 Run the full checks and verify each passes: `cargo fmt --all --check`, `cargo archcheck`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`; the Linux set; the ARM64 check; `npm test`; the CI run including the `installer` job.
+- [x] 8.1 Run the full checks and verify each passes: `cargo fmt --all --check`, `cargo archcheck`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`; the Linux set; the ARM64 check; `npm test`; the CI run including the `installer` job.
 
   Local checks pass (2026-10-09): `cargo fmt --all --check`; `cargo archcheck` (15 packages ok); `cargo clippy --workspace --all-targets -- -D warnings`; `cargo test --workspace`, every suite passing, and the ignored desktop tests of `win32-clipboard` (16, Explorer-by-hand excluded); the Linux set run here (353 tests); the ARM64 check; `npm test` (21). Fuzzing: `decode_stream` and `decode_ipc` 60 s each, clean. Open until the CI run, including the `installer` job, passes on the pushed branch.
+
+  Rerun after `rename-to-mouseflock`, on Rust 1.99.0 (2026-10-13), all passing: fmt; archcheck; clippy; `cargo test --workspace` (46 suites, 703 tests); the Linux set (23 suites, 353 tests); the ARM64 check; the ignored `win32-clipboard` desktop tests (16, Explorer-by-hand excluded); `npm test`. CI on `main` at `ceb68bc` passes `windows`, `linux` and `installer`. That is the first green `main` since this change merged: it needed #41, which adapts to Rust 1.99 and stops the input-latency tests measuring the runner's CPU. Fuzzing was not rerun; the scheduled fuzz job fails to build `windows-future` on Linux, separately from this change.
 - [ ] 8.2 Manual check with the user on both PCs, on a build installed as an upgrade (also covers add-installer 6.3's upgrade-keeps-pairing):
   - copy a single file on A, cross to B, paste into a folder — it appears, and the service log shows a file offer with a count, no name;
   - nothing moved until the paste (watch that a large file does not transfer on cursor arrival);
@@ -63,5 +65,5 @@
   - copy a multi-gigabyte file and paste — it transfers with Explorer's progress and no lag in typing meanwhile;
   - with one PC on an older version, files are not offered and text/images still cross.
 
-  Paused for `rename-to-mouseflock` (2026-10-12), with 7.2, 8.1, 8.2 and 8.3 still open. After the rename, the upgrade here runs MouseFlock to MouseFlock: two MouseFlock builds of different versions. An upgrade from a MouseFlock install no longer keeps pairing, by design. The "older version" check needs a MouseFlock build that speaks protocol version 2 or lower. No released build does, because MouseFlock builds can no longer connect, so it is covered by `crates/transport/tests/files.rs` (`a_version_2_peer_never_sees_files`) unless a build is made for it.
+  Paused for `rename-to-mouseflock` (2026-10-12), with 7.2, 8.1, 8.2 and 8.3 still open. After the rename, the upgrade here runs MouseFlock to MouseFlock: two MouseFlock builds of different versions. An upgrade from a build from before the rename no longer keeps pairing, by design. The "older version" check needs a MouseFlock build that speaks protocol version 2 or lower. None exists, because builds from before the rename can no longer connect, so it is covered by `crates/transport/tests/files.rs` (`a_version_2_peer_never_sees_files`) unless a build is made for it.
 - [ ] 8.3 Repeat 8.2's single-file and folder checks on Windows 10 22H2, deferred with the other two-PC checks if no machine is available.
