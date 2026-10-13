@@ -291,6 +291,14 @@ fn key_frames(last: u16) -> Vec<u8> {
     out
 }
 
+/// How long keys may take while a transfer is held half-sent. The tests prove
+/// the spec ("arrive without waiting for the transfer to finish") by sending
+/// the keys while the transfer cannot finish; this bound only catches a hang.
+/// A tighter bound measured the test machine's CPU, not the protocol: on a
+/// busy 2-core runner, keys took 45–340 ms with no packet lost, and as long
+/// with no transfer at all.
+const KEYS_DURING_TRANSFER: Duration = Duration::from_secs(1);
+
 /// Writes 100 keys on `control` and returns how long until `a` reported the
 /// last one. Fails if clipboard text from `peer` is reported first.
 async fn keys_arrive(
@@ -341,7 +349,7 @@ async fn input_not_delayed_by_transfer() {
 
     let during = keys_arrive(&mut control, &mut a, peer, 0x51).await;
     assert!(
-        during < alone + Duration::from_millis(50),
+        during < KEYS_DURING_TRANSFER,
         "keys took {during:?} during a transfer, {alone:?} alone"
     );
 
@@ -585,7 +593,7 @@ async fn input_not_delayed_by_image_transfer() {
 
     let during = keys_arrive(&mut control, &mut a, peer, 0x53).await;
     assert!(
-        during < alone + Duration::from_millis(50),
+        during < KEYS_DURING_TRANSFER,
         "keys took {during:?} during an image transfer, {alone:?} alone"
     );
 
