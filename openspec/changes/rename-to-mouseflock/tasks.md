@@ -10,13 +10,15 @@
 
 ## 2. Prepare the test PCs (user, before building the renamed code)
 
-- [ ] 2.1 On each test PC, follow the design's migration plan, steps 1–4:
+- [x] 2.1 On each test PC, follow the design's migration plan, steps 1–4:
   - untick *Start with Windows* and quit the app
   - run the **old** `tools\dev\service.ps1 uninstall` if the dev service is registered
   - uninstall DeskHop from Settings → Apps
   - delete `%LOCALAPPDATA%\DeskHop` if console mode was used
 
   Confirm no `DeskHop` service remains: `Get-Service DeskHop` fails.
+
+  Done by the user on the test PCs (2026-10-13).
 
 ## 3. Mechanical rename (D2)
 
@@ -52,12 +54,16 @@
   - Two log-privacy fixtures in `bin/service/src/host/tests.rs` changed length. They were rewritten to their original lengths: the file body is 26 bytes again, and the image marker fits its 24-byte slot.
 
   Not run: the `--ignored` agent, service and clipboard desktop tests. They take over this PC's clipboard and pipes while the installed DeskHop is still running.
-- [ ] 5.3 `installer\build.ps1 -Arch x64` produces `MouseFlock-<version>-x64.msi` and `MouseFlock-Setup-<version>-x64.exe`. Then the user runs `installer\test.ps1` against them in an elevated shell. It checks the `MouseFlock` service, `C:\Program Files\MouseFlock`, the `MouseFlock (UDP 47391)` and `MouseFlock (mDNS)` rules, the Start menu shortcut and the Installed apps entry. The CI `installer` job passes with the renamed globs.
-- [ ] 5.4 Manual check with the user on two PCs, both installed fresh:
+- [x] 5.3 `installer\build.ps1 -Arch x64` produces `MouseFlock-<version>-x64.msi` and `MouseFlock-Setup-<version>-x64.exe`. Then the user runs `installer\test.ps1` against them in an elevated shell. It checks the `MouseFlock` service, `C:\Program Files\MouseFlock`, the `MouseFlock (UDP 47391)` and `MouseFlock (mDNS)` rules, the Start menu shortcut and the Installed apps entry. The CI `installer` job passes with the renamed globs.
+
+  Passed: `installer\test.ps1` on this PC, run by the user (2026-10-13). The CI `installer` job passed on #40.
+- [x] 5.4 Manual check with the user on two PCs, both installed fresh:
   - the PCs find each other over `_mouseflock._udp`, pair with a code, and the cursor crosses
   - typing works, and copied text and an image paste on the other PC
   - the tray says "MouseFlock: …"
   - `C:\ProgramData\MouseFlock` holds the new identity
+
+  Passed on two PCs with fresh installs, checked by the user (2026-10-13).
 
 ## 6. Land it
 
