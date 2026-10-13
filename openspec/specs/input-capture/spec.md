@@ -57,7 +57,7 @@ An event SHALL be reported as physical when it comes from a keyboard or mouse at
 - **WHEN** the user presses a key on this machine's keyboard
 - **THEN** the key is reported as physical
 
-#### Scenario: DeskHop's own injection
+#### Scenario: MouseFlock's own injection
 - **WHEN** MouseFlock injects a key press on a peer's behalf
 - **THEN** that key press is reported as injected
 
