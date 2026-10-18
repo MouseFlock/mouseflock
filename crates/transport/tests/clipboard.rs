@@ -425,7 +425,7 @@ async fn image_transfers_at_version_2() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_version_1_peer_pairs_and_shares_text_but_never_images() {
-    // Pairing by code between this release and a node like 0.1.0.
+    // Pairing by code between this release and a node that speaks only version 1.
     let (mut a, mut old) = (node(machine("A")), old_node(machine("Old")));
     pair(&mut old, &mut a).await;
 
