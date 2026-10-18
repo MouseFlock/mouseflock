@@ -123,15 +123,19 @@ After exchanging `Hello`, both peers SHALL use the highest protocol version that
 - **THEN** this peer closes the connection with the version-mismatch reason and reports that it runs the older version itself
 
 ### Requirement: Protocol version range of this release
-This release SHALL speak protocol versions 1 and 2, advertising a lowest version of 1 and a highest version of 2 in its `Hello`. Version 2 SHALL differ from version 1 only by adding the message type `0x0015` `ClipboardImageData`, allowed on clipboard streams. A connection that agreed version 1 SHALL behave exactly as a version 1 release does.
+This release SHALL speak protocol versions 1 to 3, advertising a lowest version of 1 and a highest version of 3 in its `Hello`. Version 2 SHALL differ from version 1 only by adding the message type `0x0015` `ClipboardImageData`, allowed on clipboard streams. Version 3 SHALL differ from version 2 only by adding, for file copies, `0x0016` `ClipboardFilesData` (a manifest, on clipboard streams), `0x0017` `FileContentRequest` (on the control stream) and `0x0018` `FileContentData` (one file's contents, on clipboard streams). A connection SHALL behave exactly as the older release does whenever it agrees a version below the one that defines a feature.
 
 #### Scenario: Hello sent by this release
 - **WHEN** this release sends `Hello`
-- **THEN** the payload is `01 00 02 00`
+- **THEN** the payload is `01 00 03 00`
 
 #### Scenario: Peer running 0.1.0
 - **WHEN** this release connects to a peer whose `Hello` advertises versions 1 to 1
 - **THEN** the connection agrees version 1, and pairing, input and text clipboard work as between two version 1 releases
+
+#### Scenario: Peer that understands images but not files
+- **WHEN** this release connects to a peer whose `Hello` advertises versions 1 to 2
+- **THEN** the connection agrees version 2, text and image clipboard work, and no file copy is offered on it
 
 ### Requirement: Close reasons
 A peer closing a connection SHALL give one of these QUIC application error codes: `0` normal close, `1` protocol error, `2` version mismatch, `3` wrong pairing code, `4` not ready to pair, `5` not a member. A peer SHALL close with protocol error whenever this specification calls something a protocol error. New close reasons SHALL be added in `docs/protocol.md` with the version that introduced them.
