@@ -49,7 +49,7 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
 name = "archcheck"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde_json",
 ]
@@ -1075,7 +1075,7 @@ checksum = "66b7e2430c6dff6a955451e2cfc438f09cea1965a9d6f87f7e3b90decc014099"
 
 [[package]]
 name = "engine"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "model",
  "policy",
@@ -1972,7 +1972,7 @@ dependencies = [
 
 [[package]]
 name = "ipc"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "model",
  "tokio",
@@ -2338,11 +2338,11 @@ dependencies = [
 
 [[package]]
 name = "model"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "mouseflock-agent"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ipc",
  "model",
@@ -2355,7 +2355,7 @@ dependencies = [
 
 [[package]]
 name = "mouseflock-desktop"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ipc",
  "model",
@@ -2371,7 +2371,7 @@ dependencies = [
 
 [[package]]
 name = "mouseflock-service"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "engine",
  "ipc",
@@ -2792,7 +2792,7 @@ dependencies = [
 
 [[package]]
 name = "pairing"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ed25519-dalek",
  "hkdf",
@@ -2992,7 +2992,7 @@ dependencies = [
 
 [[package]]
 name = "policy"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "polling"
@@ -3108,7 +3108,7 @@ dependencies = [
 
 [[package]]
 name = "proto"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "quick-xml"
@@ -4639,7 +4639,7 @@ dependencies = [
 
 [[package]]
 name = "transport"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "if-addrs",
  "mdns-sd",
@@ -5019,7 +5019,7 @@ checksum = "72069c3113ab32ab29e5584db3c6ec55d416895e60715417b5b883a357c3e471"
 
 [[package]]
 name = "win32-clipboard"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "png 0.18.1",
  "windows 0.61.3",
@@ -5028,7 +5028,7 @@ dependencies = [
 
 [[package]]
 name = "win32-input"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "model",
  "windows 0.61.3",
@@ -5036,7 +5036,7 @@ dependencies = [
 
 [[package]]
 name = "win32-session"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "tokio",
  "windows 0.61.3",
@@ -5044,7 +5044,7 @@ dependencies = [
 
 [[package]]
 name = "win32-shell"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "tokio",
  "windows 0.61.3",
