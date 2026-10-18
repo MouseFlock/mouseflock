@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <title>MouseFlock</title>
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#4f6bff"/>
+      <stop offset="1" stop-color="#7a3cf0"/>
+    </linearGradient>
+    <!-- A mouse pointer, tip at the origin, pointing up and to the left. -->
+    <path id="pointer" d="M0 0 L0 22 L5.4 17 L9 25.4 L12.6 23.8 L9.1 15.8 L16 15.8 Z"
+          stroke-linejoin="round"/>
+  </defs>
+  <rect x="48" y="48" width="928" height="928" rx="208" fill="url(#tile)"/>
+  <g transform="translate(25 -14)">
+    <!-- The flock: two pointers following the lead in a V, behind it. -->
+    <use href="#pointer" transform="translate(640 200) scale(8.4)" fill="#d9d4ff" stroke="#d9d4ff" stroke-width="1.2"/>
+    <use href="#pointer" transform="translate(200 640) scale(8.4)" fill="#d9d4ff" stroke="#d9d4ff" stroke-width="1.2"/>
+    <!-- The lead: the one mouse. -->
+    <use href="#pointer" transform="translate(240 240) scale(15.5)" fill="#ffffff" stroke="#ffffff" stroke-width="1"/>
+  </g>
+</svg>
