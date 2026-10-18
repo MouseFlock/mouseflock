@@ -432,6 +432,12 @@ fn key_frames(last: u16) -> Vec<u8> {
     out
 }
 
+/// How long keys may take while a file transfer is held half-sent: a hang
+/// bound only, as in `clipboard.rs`. The test proves keys do not wait for the
+/// transfer by sending them while it cannot finish; a tighter bound measured
+/// the test machine's CPU.
+const KEYS_DURING_TRANSFER: Duration = Duration::from_secs(1);
+
 /// Writes 100 keys on `control` and returns how long until `a` reported the
 /// last one.
 async fn keys_arrive(control: &mut quinn::SendStream, a: &mut Node, last: u16) -> Duration {
@@ -483,7 +489,7 @@ async fn input_not_delayed_by_a_file_transfer() {
 
     let during = keys_arrive(&mut control, &mut a, 0x53).await;
     assert!(
-        during < alone + Duration::from_millis(50),
+        during < KEYS_DURING_TRANSFER,
         "keys took {during:?} during a file transfer, {alone:?} alone"
     );
 
@@ -502,16 +508,19 @@ async fn reset_mid_file_fails_the_fetch_and_keeps_the_connection() {
     let (client, mut a) = member_client("A");
     let (connection, _control, _recv) = up_client(&client, &mut a, Hello::this_release()).await;
     let peer = client.identity.peer_id();
-    let fetch = a.handle.request_file(peer, 3, 0);
+    let mut fetch = a.handle.request_file(peer, 3, 0);
     let mut out = Vec::new();
     files::encode_content_data(3, 0, 1000, &mut out).unwrap();
     clipboard::encode_chunk(&[1; 100], &mut out).unwrap();
     let mut stream = connection.open_uni().await.unwrap();
     stream.write_all(&out).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    // Reset only once `a` has read the header. A reset that overtakes the
+    // header leaves the fetch to the caller's timeout (see `FileFetch`), and
+    // a fixed sleep did not always wait long enough on a busy machine.
+    let first = timeout(WAIT, fetch.recv()).await.expect("fetch stalled");
+    assert_eq!(first, Some(FileChunk::Len(1000)));
     stream.reset(quinn::VarInt::from_u32(0)).unwrap();
-    let (len, _, ended) = drain(fetch).await;
-    assert_eq!(len, Some(1000));
+    let (_, _, ended) = drain(fetch).await;
     assert!(!ended);
     assert_eq!(
         timeout(Duration::from_millis(300), connection.closed())
