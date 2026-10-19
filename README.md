@@ -16,6 +16,9 @@
   <a href="SECURITY.md">Security</a>
 </p>
 
+> [!IMPORTANT]
+> **The only official downloads are on this repository's [Releases](https://github.com/mouseflock/mouseflock/releases) page.** MouseFlock has no other website and is never sold. A "MouseFlock" download anywhere else is not from this project, so don't run it.
+
 ---
 
 MouseFlock is a software KVM: it shares one keyboard and mouse between PCs on your network, with no extra hardware. Each PC keeps its own screen.
@@ -34,7 +37,7 @@ There is nothing to set up. Install it on two PCs, type a short code to pair the
 
 You need two or more PCs on the same network, each running **Windows 11** or **Windows 10 22H2**, on x64 or ARM64. Windows 10 should work, but this release hasn't been tested on it yet.
 
-1. **Download** the setup program for your PCs from the [latest release](https://github.com/mouseflock/mouseflock/releases/latest): `MouseFlock-Setup-<version>-x64.exe` for most PCs, or `-arm64.exe` for ARM PCs such as Snapdragon laptops.
+1. **Download** the setup program for your PCs from the [latest release](https://github.com/mouseflock/mouseflock/releases/latest), and only from there: `MouseFlock-Setup-<version>-x64.exe` for most PCs, or `-arm64.exe` for ARM PCs such as Snapdragon laptops. Each release lists its files' SHA-256 hashes, so you can check a download with `Get-FileHash`.
 2. **Install it on each PC.** MouseFlock isn't code-signed yet, so Windows may say *"Windows protected your PC"*. Choose **More info**, then **Run anyway**. Setup opens the firewall for MouseFlock and starts it; there's nothing else to configure.
 3. **Pair the PCs.** In MouseFlock on one PC, choose **Add a PC**, then **Show a code**. On the other PC, choose **Add a PC**, then **Enter a code**, and type the code it shows, such as `137-4829153`.
 4. **Push the cursor** off the edge of the screen toward the other PC. It crosses, and your keyboard goes with it.
