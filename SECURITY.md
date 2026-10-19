@@ -16,6 +16,10 @@ Please include:
 
 MouseFlock is a small open-source project, so responses are best effort. A report will be acknowledged as soon as possible, kept private while a fix is prepared, and credited in the release notes unless you'd rather stay anonymous.
 
+## Fake downloads
+
+MouseFlock is distributed only through this repository's [Releases](https://github.com/mouseflock/mouseflock/releases) page. If you find a website, store listing or file offering a "MouseFlock" download anywhere else, please report it the same way, privately.
+
 ## Supported versions
 
 Only the latest release gets security fixes. MouseFlock is early, and fixes ship as a new release rather than as patches to older ones.
